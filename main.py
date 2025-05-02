@@ -279,6 +279,8 @@ def score_swap(
 def click_coord(coord: GridCoord, window_origin: WindowOrigin):
     """Clicks the calculated screen coordinates for a grid cell."""
     x, y = get_pixel_coords(coord[0], coord[1], window_origin)
+    pyautogui.moveTo(x, y, duration=0.1)
+    time.sleep(0.1)
     log.debug(f"Clicking grid {coord} at screen ({x}, {y})")
     pyautogui.click(x, y)
 
@@ -388,8 +390,6 @@ def main():
 
             # --- Capture and Classify Board ---
             log.debug("Capturing board...")
-            # Pass window_origin if grab_board_tiles needs it, otherwise ensure it captures relative to it.
-            # The current extract_tiles.py seems to capture relative to the window, which is good.
             tiles = grab_board_tiles()
             if not tiles:
                 log.warning("Failed to capture board tiles. Retrying...")
@@ -410,7 +410,6 @@ def main():
                 continue
 
             # --- Find and Score Swaps ---
-            log.debug("Finding valid swaps...")
             swaps_info = find_valid_swaps(content)
             log.debug(f"{len(swaps_info)} valid swaps found.")
 
