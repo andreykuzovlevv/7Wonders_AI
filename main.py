@@ -14,6 +14,7 @@ import pygetwindow as gw
 import win32gui  # Required for accurate window client area coordinates
 
 import config
+from heuristics import find_valid_swaps, score_swap, choose_best_swap
 from extract_tiles import (
     grab_board_tiles,
 )  # Assuming this still works correctly for grabbing tiles relative to window
@@ -24,7 +25,6 @@ from tile_classifier import TileClassifier, classify_tile
 # ---------------------------------------------------------------------------
 DEBUG_MODE = True
 POST_FIRST_CLICK_DELAY = 0.4  # seconds between first and second click
-POST_SWAP_DELAY = 0.6  # wait after second click for animation start
 BOARD_CHANGE_TIMEOUT = 3.5  # seconds to wait for the board to differ
 POLL_INTERVAL = 0.25
 NO_MOVE_DELAY = 1.0
@@ -161,125 +161,13 @@ def board_hash(content: List[List[str]], background: List[List[str]]) -> str:
     return hashlib.md5(s.encode()).hexdigest()
 
 
-def get_matches(grid: List[List[str]]) -> List[Set[GridCoord]]:
-    """Return list of all groups of 3+ identical tiles (after a hypothetical swap)."""
-    rows, cols = config.GRID_ROWS, config.GRID_COLS
-    matches: List[Set[GridCoord]] = []
-    # Horizontal
-    for r in range(rows):
-        c = 0
-        while c < cols - 2:
-            if (
-                grid[r][c] == "empty" or grid[r][c] == "block"
-            ):  # Don't match empty or blocks
-                c += 1
-                continue
-            run_val = grid[r][c]
-            run_end = c + 1
-            while run_end < cols and grid[r][run_end] == run_val:
-                run_end += 1
-            if run_end - c >= 3:
-                matches.append({(r, x) for x in range(c, run_end)})
-            c = run_end
-    # Vertical
-    for c in range(cols):
-        r = 0
-        while r < rows - 2:
-            if (
-                grid[r][c] == "empty" or grid[r][c] == "block"
-            ):  # Don't match empty or blocks
-                r += 1
-                continue
-            run_val = grid[r][c]
-            run_end = r + 1
-            while run_end < rows and grid[run_end][c] == run_val:
-                run_end += 1
-            if run_end - r >= 3:
-                matches.append({(x, c) for x in range(r, run_end)})
-            r = run_end
-    return matches
-
-
-def simulate_swap(grid: List[List[str]], a: GridCoord, b: GridCoord) -> List[List[str]]:
-    new_grid = [row[:] for row in grid]
-    (ra, ca), (rb, cb) = a, b
-    new_grid[ra][ca], new_grid[rb][cb] = new_grid[rb][cb], new_grid[ra][ca]
-    return new_grid
-
-
-def find_valid_swaps(
-    content: List[List[str]],
-) -> List[Tuple[Swap, List[Set[GridCoord]]]]:
-    rows, cols = config.GRID_ROWS, config.GRID_COLS
-    valid: List[Tuple[Swap, List[Set[GridCoord]]]] = []
-    # Define non-swappable types explicitly
-    non_swappable = {
-        "empty",
-        "block",
-    }  # Add any other types like 'fragment' if they cannot be swapped
-    for r in range(rows):
-        for c in range(cols):
-            if content[r][c] in non_swappable:
-                continue
-            # Check potential swaps right and down
-            for dr, dc in ((0, 1), (1, 0)):
-                nr, nc = r + dr, c + dc
-                # Check bounds and if the neighbor is swappable
-                if nr >= rows or nc >= cols or content[nr][nc] in non_swappable:
-                    continue
-                # Don't check swaps twice
-                if (dr, dc) == (
-                    1,
-                    0,
-                ):  # Only check down swap if not checked as right swap from above
-                    pass  # Already checked (r-1, c) <-> (r, c)
-
-                swapped_grid = simulate_swap(content, (r, c), (nr, nc))
-                matches = get_matches(swapped_grid)
-                if matches:
-                    valid.append((((r, c), (nr, nc)), matches))
-    return valid
-
-
-def score_swap(
-    swap: Swap, matches: List[Set[GridCoord]], background: List[List[str]]
-) -> float:
-    score = 0.0
-    total_matched_tiles = 0
-    background_cleared = 0
-    shield_cleared = 0
-
-    # Calculate score based on resulting matches
-    for match_set in matches:
-        total_matched_tiles += len(match_set)
-        for r, c in match_set:
-            # Check bounds just in case
-            if 0 <= r < config.GRID_ROWS and 0 <= c < config.GRID_COLS:
-                bg_type = background[r][c]
-                if bg_type == "shield":
-                    shield_cleared += 1
-                elif bg_type == "stone":
-                    background_cleared += 1
-
-    # Scoring weights (tune these as needed)
-    score += total_matched_tiles  # Base score for number of tiles matched
-    score += background_cleared * 2  # Bonus for clearing stone
-    score += shield_cleared * 4  # Higher bonus for clearing shield
-
-    # --- Add future scoring logic here ---
-    # e.g., bonus for matching near fragments, penalty for certain moves?
-    # e.g., check if swap involves a 'bonus' tile type?
-
-    return score
-
-
 # ---------- clicking ---------- #
 
 
 def click_coord(coord: GridCoord, window_origin: WindowOrigin):
     """Clicks the calculated screen coordinates for a grid cell."""
     x, y = get_pixel_coords(coord[0], coord[1], window_origin)
-    pyautogui.moveTo(x, y, duration=0.1)
+    pyautogui.moveTo(x, y, duration=0.3, tween=pyautogui.easeInOutQuad)
     time.sleep(0.1)
     log.debug(f"Clicking grid {coord} at screen ({x}, {y})")
     pyautogui.click(x, y)
@@ -306,7 +194,6 @@ def perform_swap(
     click_coord(a, window_origin)
     time.sleep(POST_FIRST_CLICK_DELAY)
     click_coord(b, window_origin)
-    time.sleep(POST_SWAP_DELAY)
 
 
 def wait_for_change(prev_hash: str, window_origin: WindowOrigin) -> str:
@@ -391,6 +278,7 @@ def main():
             # --- Capture and Classify Board ---
             log.debug("Capturing board...")
             tiles = grab_board_tiles()
+            log.debug("Tiles captured")
             if not tiles:
                 log.warning("Failed to capture board tiles. Retrying...")
                 time.sleep(NO_MOVE_DELAY)
@@ -410,35 +298,7 @@ def main():
                 continue
 
             # --- Find and Score Swaps ---
-            swaps_info = find_valid_swaps(content)
-            log.debug(f"{len(swaps_info)} valid swaps found.")
-
-            if not swaps_info:
-                log.info("No valid swaps found. Waiting...")
-                blacklist.clear()  # Clear blacklist if stuck with no moves
-                time.sleep(NO_MOVE_DELAY)
-                continue
-
-            # --- Choose Best Swap (excluding blacklisted) ---
-            best_swap, best_score = None, -float("inf")
-            scored_swaps = []
-            for swap, matches in swaps_info:
-                # Normalize swap tuple to ensure ((r1,c1),(r2,c2)) where r1<=r2 or (r1==r2 and c1<c2)
-                # This makes blacklist checking consistent.
-                coord1, coord2 = swap
-                normalized_swap = tuple(sorted(swap))
-
-                if normalized_swap in blacklist:
-                    log.debug(f"Skipping blacklisted swap: {normalized_swap}")
-                    continue
-
-                s = score_swap(swap, matches, background)
-                scored_swaps.append(
-                    (s, normalized_swap)
-                )  # Store score and normalized swap
-                if s > best_score:
-                    best_score, best_swap = s, normalized_swap  # Use normalized swap
-
+            best_swap = choose_best_swap(content, background, blacklist)
             if not best_swap:
                 if blacklist:
                     log.info(
@@ -454,7 +314,6 @@ def main():
 
             # --- Perform Swap ---
             (coord1, coord2) = best_swap  # Use the chosen normalized swap
-            log.debug(f"Best swap: {coord1} <-> {coord2} (Score: {best_score:.2f})")
             perform_swap(coord1, coord2, window_origin, content)  # Pass content grid
 
             # --- Wait for Board Change ---

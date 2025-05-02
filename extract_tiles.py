@@ -5,6 +5,7 @@ from PIL import Image
 from typing import List, Tuple
 from config import *
 
+
 def grab_board_tiles() -> List[Tuple[Tuple[int, int], Image.Image]]:
     screenshot = _take_screenshot()
     grid = _crop_to_grid(screenshot)
@@ -14,7 +15,7 @@ def grab_board_tiles() -> List[Tuple[Tuple[int, int], Image.Image]]:
 
 def _get_window_bbox(title_keyword):
     windows = gw.getWindowsWithTitle(title_keyword)
-    
+
     if not windows:
         raise Exception("Window not found.")
     win = windows[0]
@@ -27,13 +28,13 @@ def _get_window_bbox(title_keyword):
     height = rect[3]
     return {"left": left, "top": top, "width": width, "height": height}
 
+
 def _take_screenshot() -> Image.Image:
     # Set your window title keyword
     WINDOW_TITLE = "7 Wonders"
 
     # Grab bounding box
     bbox = _get_window_bbox(WINDOW_TITLE)
-    print("Capturing window at:", bbox)
 
     # Capture with MSS
     with mss.mss() as sct:
@@ -41,18 +42,16 @@ def _take_screenshot() -> Image.Image:
         screenshot = Image.frombytes("RGB", (img.width, img.height), img.rgb)
         screenshot.save("screenshot.png")
         return screenshot
-    
+
 
 def _crop_to_grid(screenshot: Image.Image) -> Image.Image:
     """
     Crop the full-window screenshot down to just the grid rectangle.
     """
-    return screenshot.crop((
-        GRID_PIXEL_LEFT,
-        GRID_PIXEL_TOP,
-        GRID_PIXEL_RIGHT,
-        GRID_PIXEL_BOTTOM
-    ))
+    return screenshot.crop(
+        (GRID_PIXEL_LEFT, GRID_PIXEL_TOP, GRID_PIXEL_RIGHT, GRID_PIXEL_BOTTOM)
+    )
+
 
 def _separate_to_tiles(grid_img: Image.Image):
     """
@@ -62,15 +61,15 @@ def _separate_to_tiles(grid_img: Image.Image):
     grid_img.save("screenshot_grid.png")
     tiles = []
     grid_w, grid_h = grid_img.size
-    cell_w = grid_w  / GRID_COLS
-    cell_h = grid_h  / GRID_ROWS
+    cell_w = grid_w / GRID_COLS
+    cell_h = grid_h / GRID_ROWS
 
     for r in range(GRID_ROWS):
         for c in range(GRID_COLS):
-            left   = c * cell_w
-            top    = r * cell_h
-            right  = left + cell_w
-            bottom = top  + cell_h
+            left = c * cell_w
+            top = r * cell_h
+            right = left + cell_w
+            bottom = top + cell_h
 
             tile_img = grid_img.crop((left, top, right, bottom))
             tiles.append(((r, c), tile_img))
