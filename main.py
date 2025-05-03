@@ -226,29 +226,29 @@ def wait_for_change(prev_hash: str, window_origin: WindowOrigin) -> str:
 
 def level_complete(content: List[List[str]], background: List[List[str]]) -> bool:
     """Checks if all background tiles are cleared. Assumes fragments drop automatically."""
-    # Check if any 'block' tiles remain (assuming these represent fragments or objectives)
+    # Check if any 'fragment' tiles remain (assuming these represent fragments or objectives)
     # Or check if any breakable background tiles remain
     for r in range(config.GRID_ROWS):
         for c in range(config.GRID_COLS):
-            # If fragments are represented by a 'block' type that needs to reach bottom:
-            # You'd need a more complex check, e.g., ensure no 'block' tiles exist above row config.GRID_ROWS - 1
+            # If fragments are represented by a 'fragment' type that needs to reach bottom:
+            # You'd need a more complex check, e.g., ensure no 'fragment' tiles exist above row config.GRID_ROWS - 1
             # Simplified check: Are all breakable backgrounds gone?
             if background[r][c] in {"stone", "shield"}:
                 return False
     # Add check for wonder fragments if they are distinct tile types that must reach bottom
     has_fragments = any(
-        "block" in row for row in content
-    )  # Example if 'block' represents fragments
+        "fragment" in row for row in content
+    )  # Example if 'fragment' represents fragments
     if has_fragments:
-        # Check if all 'block' tiles are at the bottom row or gone
+        # Check if all 'fragment' tiles are at the bottom row or gone
         for r in range(config.GRID_ROWS - 1):  # Check all rows except the last
             for c in range(config.GRID_COLS):
-                if content[r][c] == "block":
+                if content[r][c] == "fragment":
                     return False  # Fragment found not at the bottom
 
     # If we passed all checks, level might be complete
     # Note: This might need adjustment based on exact win conditions (e.g., specific fragment collection)
-    # For now, assume clearing background is sufficient if no 'block' tiles are stuck.
+    # For now, assume clearing background is sufficient if no 'fragment' tiles are stuck.
     log.info("Checking level completion: No stone/shield background found.")
     return True  # Simplified: No more breakable background tiles
 

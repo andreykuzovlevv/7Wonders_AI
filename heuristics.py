@@ -33,8 +33,8 @@ W = dict(
     # --- Cascade Chaining ---
     chain_depth_decay=0.6,  # Multiplier for 1st cascade score, ^2 for 2nd etc. (Value < 1)
     # --- REMOVED/REPLACED ---
-    # block=10.0              # Fragments aren't 'broken', path clearing is key
-    # near_block_adj=0.8      # Replaced by direct fragment_path_clear
+    # fragment=10.0              # Fragments aren't 'broken', path clearing is key
+    # near_fragment_adj=0.8      # Replaced by direct fragment_path_clear
     # bottom_row_bonus=0.5    # Implicitly handled by fragment path focus
     # edge_bonus=0.3          # Less critical than path/background focus
     # bonus0/1_clear          # Replaced by dynamic bonus estimation
@@ -60,7 +60,7 @@ def count_tiles(grid: List[List[str]], tile_type: str) -> int:
 
 def get_fragment_paths(content: List[List[str]]) -> Set[GridCoord]:
     """
-    Identifies all grid cells located underneath the lowest 'block' (fragment)
+    Identifies all grid cells located underneath the lowest 'fragment' (fragment)
     in each column, down to the bottom row. These are critical clear targets.
     Returns a set of (row, col) tuples.
     """
@@ -70,7 +70,7 @@ def get_fragment_paths(content: List[List[str]]) -> Set[GridCoord]:
         fragment_r = -1
         # Find the row index of the lowest fragment in this column
         for r in range(rows - 1, -1, -1):  # Scan bottom-up
-            if content[r][c] == "block":
+            if content[r][c] == "fragment":
                 fragment_r = r
                 break  # Found the lowest one
         # If a fragment was found, add all cells below it to the path set
@@ -113,7 +113,7 @@ def get_matches(grid: List[List[str]]) -> List[Set[GridCoord]]:
     """
     Finds all groups of 3+ adjacent (H/V) identical, matchable tiles.
     Merges overlapping groups (e.g., T/L shapes).
-    Ignores 'empty', 'block', and 'bonus_*' tiles for matching.
+    Ignores 'empty', 'fragment', and 'bonus_*' tiles for matching.
     """
     rows, cols = config.GRID_ROWS, config.GRID_COLS
     matchable_tiles = {f"gem_{i}" for i in range(8)}  # Only gems are matchable
@@ -179,24 +179,24 @@ def get_matches(grid: List[List[str]]) -> List[Set[GridCoord]]:
 def apply_gravity(content: List[List[str]]) -> List[List[str]]:
     """
     Simulates simple vertical gravity after tile removals.
-    Treats 'block' tiles as unmovable by gravity unless space below is empty
+    Treats 'fragment' tiles as unmovable by gravity unless space below is empty
     (basic simulation - real game might differ). Fills top with 'empty'.
     Returns the *modified* grid (in-place modification for efficiency).
 
     NOTE: This is a simplified gravity model primarily for cascade *detection*
     in the lookahead. The *scoring* prioritizes based on the game state *before* gravity.
     It does NOT perfectly simulate fragment dropping physics, which is complex.
-    Assumes 'block' tiles only fall one step if the cell below is 'empty'.
+    Assumes 'fragment' tiles only fall one step if the cell below is 'empty'.
     """
     rows, cols = config.GRID_ROWS, config.GRID_COLS
 
-    # Create a list of tiles that fall per column, excluding blocks initially
+    # Create a list of tiles that fall per column, excluding fragments initially
     for c in range(cols):
         falling_tiles = []
-        original_block_rows = []
+        original_fragment_rows = []
         for r in range(rows):
-            if content[r][c] == "block":
-                original_block_rows.append(r)
+            if content[r][c] == "fragment":
+                original_fragment_rows.append(r)
             elif content[r][c] != "empty":
                 falling_tiles.append(content[r][c])
 
@@ -204,26 +204,26 @@ def apply_gravity(content: List[List[str]]) -> List[List[str]]:
         for r in range(rows):
             content[r][c] = "empty"
 
-        # Place falling non-block tiles from the bottom up
+        # Place falling non-fragment tiles from the bottom up
         write_row = rows - 1
         for tile in reversed(falling_tiles):
             if write_row >= 0:
                 content[write_row][c] = tile
                 write_row -= 1
 
-        # Place blocks back, potentially falling one step
-        for r_orig in sorted(original_block_rows):
+        # Place fragments back, potentially falling one step
+        for r_orig in sorted(original_fragment_rows):
             r_target = r_orig
             # Check if space directly below original position IS NOW empty
             if r_orig + 1 < rows and content[r_orig + 1][c] == "empty":
                 r_target = r_orig + 1  # Fall one step
-            # Place block - find lowest available spot at or below r_target
+            # Place fragment - find lowest available spot at or below r_target
             final_r = r_target
             while final_r + 1 < rows and content[final_r + 1][c] == "empty":
                 final_r += 1
 
             if final_r >= 0:  # Should always be true if rows > 0
-                content[final_r][c] = "block"
+                content[final_r][c] = "fragment"
 
     return content
 
@@ -331,7 +331,7 @@ def estimate_bonus_score(
         # 4. Base value: Clearing any regular tile?
         if (
             current_content != "empty"
-            and current_content != "block"
+            and current_content != "fragment"
             and not current_content.startswith("bonus_")
         ):
             cell_score += W["bonus_base_tile_clear"]
@@ -383,9 +383,9 @@ def score_swap(
     tile1, tile2 = content[r1][c1], content[r2][c2]
     is_bonus_activation = False
     bonus_tile_type, bonus_r, bonus_c = None, -1, -1
-    # Define swappable non-bonus targets (cannot swap bonus with empty/block/another bonus)
+    # Define swappable non-bonus targets (cannot swap bonus with empty/fragment/another bonus)
     swappable_target = (
-        lambda t: t != "empty" and t != "block" and not t.startswith("bonus_")
+        lambda t: t != "empty" and t != "fragment" and not t.startswith("bonus_")
     )
 
     if tile1.startswith("bonus_") and swappable_target(tile2):
@@ -561,7 +561,7 @@ def find_valid_swaps(
     """
     Finds all valid swaps:
     - Swapping two adjacent gems that create a match of 3+.
-    - Swapping an adjacent bonus tile with a non-empty, non-block, non-bonus tile.
+    - Swapping an adjacent bonus tile with a non-empty, non-fragment, non-bonus tile.
     Returns list of tuples: ((original_swap_coords), list_of_merged_matches_after_swap)
     """
     rows, cols = config.GRID_ROWS, config.GRID_COLS
@@ -570,7 +570,7 @@ def find_valid_swaps(
         set()
     )  # Avoid checking same swap pair twice (e.g., (a,b) and (b,a))
     # Define tiles that cannot be part of a swap initiation or target (unless it's a bonus activating)
-    non_swappable_base = {"empty", "block"}
+    non_swappable_base = {"empty", "fragment"}
 
     for r in range(rows):
         for c in range(cols):
@@ -604,7 +604,7 @@ def find_valid_swaps(
                 # Check for bonus activation: one is bonus, other is swappable target
                 swappable_target = (
                     lambda t: t != "empty"
-                    and t != "block"
+                    and t != "fragment"
                     and not t.startswith("bonus_")
                 )
                 if (tile1.startswith("bonus_") and swappable_target(tile2)) or (
