@@ -2,42 +2,48 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import config
 
 
 class QNetwork(nn.Module):
     def __init__(
-        self, input_channels, num_actions_placeholder=None
-    ):  # num_actions not used directly in output
+        self, input_channels, action_dim=4, num_global_features=3
+    ):  # e.g., stone_norm, shield_norm, fragment_flag
         super().__init__()
-        # CNN layers to process the board state (input_channels depends on state representation)
+        # CNN for board state
         self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        # Flatten and add Fully Connected layers
-        # The input size to FC layers depends on grid size and conv output
         self.fc1 = nn.Linear(
             64 * config.GRID_ROWS * config.GRID_COLS, 128
-        )  # Adjust size!
+        )  # Spatial features size
 
-        # Branch to process action representation (simple example: coordinates)
-        # Action representation needs to be defined - e.g., 4 numbers for (r1,c1,r2,c2)
-        self.fc_action = nn.Linear(4, 32)  # Example size
+        # Branch for global state features
+        self.fc_global1 = nn.Linear(num_global_features, 16)  # Global features size
 
-        # Combine state and action features
-        self.fc_combine1 = nn.Linear(128 + 32, 64)
+        # Branch for action representation
+        self.fc_action1 = nn.Linear(action_dim, 32)  # Action features size
+
+        # Combine state (spatial + global) and action features
+        combined_feature_size = 128 + 16 + 32
+        self.fc_combine1 = nn.Linear(combined_feature_size, 64)
         self.fc_output = nn.Linear(64, 1)  # Output single Q-value
 
-    def forward(self, state_tensor, action_tensor):
-        # Process state through CNN
-        x_state = F.relu(self.conv1(state_tensor))
-        x_state = F.relu(self.conv2(x_state))
-        x_state = x_state.view(x_state.size(0), -1)  # Flatten
-        x_state = F.relu(self.fc1(x_state))
+    def forward(self, state_tensor, global_features_tensor, action_tensor):
+        # Process spatial state through CNN
+        x_spatial = F.relu(self.conv1(state_tensor))
+        x_spatial = F.relu(self.conv2(x_spatial))
+        x_spatial = x_spatial.view(x_spatial.size(0), -1)  # Flatten
+        x_spatial = F.relu(self.fc1(x_spatial))
+
+        # Process global state features
+        x_global = F.relu(self.fc_global1(global_features_tensor))
 
         # Process action
-        x_action = F.relu(self.fc_action(action_tensor))
+        x_action = F.relu(self.fc_action1(action_tensor))
 
         # Combine and produce Q-value
-        x_combined = torch.cat((x_state, x_action), dim=1)
+        # Ensure tensors are correctly shaped (batch_size, feature_size)
+        x_combined = torch.cat((x_spatial, x_global, x_action), dim=1)
         x_combined = F.relu(self.fc_combine1(x_combined))
         q_value = self.fc_output(x_combined)
         return q_value

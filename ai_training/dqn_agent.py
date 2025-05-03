@@ -5,6 +5,8 @@ from collections import deque
 import torch
 import torch.optim as optim
 
+from dqn_model import QNetwork
+
 
 class DQNAgent:
     def __init__(self, state_shape, action_representation_size, seed):

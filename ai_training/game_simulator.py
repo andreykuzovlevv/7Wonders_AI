@@ -1,896 +1,747 @@
-# --- File: game_simulator.py ---
-
-import random
-import copy  # Use deepcopy for state isolation if needed, but be mindful of performance
-from typing import List, Tuple, Set, Dict, Optional
+# --- game_simulator.py ---
 import numpy as np
-import logging  # Optional, but helpful for debugging
+import random
+from typing import List, Tuple, Set, Optional  # For type hinting
+from collections import defaultdict, deque
 
-# --- Configuration ---
-# (Ideally load from a config file or pass during init)
-DEFAULT_GRID_ROWS = 10
-DEFAULT_GRID_COLS = 10
+# Assuming config.py is in the same directory or accessible
+import config
 
-# Tile Types (Using strings for clarity in logic)
-EMPTY = "empty"
-FRAGMENT = "fragment"
-GEM_TYPES = [f"gem_{i}" for i in range(8)]
-BONUS_0 = "bonus_0"  # Row clear
-BONUS_1 = "bonus_1"  # Plus clear
-BONUS_2 = "bonus_2"  # Random clear
-BONUS_TYPES = [BONUS_0, BONUS_1, BONUS_2]
-ALL_GEMS_AND_BONUSES = GEM_TYPES + BONUS_TYPES
+# Type hint for a swap action
+Swap = Tuple[Tuple[int, int], Tuple[int, int]]
 
-# Background Types
-BG_NONE = "none"
-BG_STONE = "stone"
-BG_SHIELD = "shield"
-BG_BLOCKED = "blocked"  # For irregular grids if needed
-
-# Mapping for state representation
-CONTENT_CLASSES = [EMPTY] + GEM_TYPES + [FRAGMENT] + BONUS_TYPES
-BACKGROUND_CLASSES = [BG_NONE, BG_STONE, BG_SHIELD, BG_BLOCKED]  # Add blocked if used
-
-MAP_FG = {c: i for i, c in enumerate(CONTENT_CLASSES)}
-MAP_BG = {c: i for i, c in enumerate(BACKGROUND_CLASSES)}
-
-# --- Type Hint Definitions ---
-GridCoord = Tuple[int, int]  # (row, col)
-Swap = Tuple[GridCoord, GridCoord]
-GridState = List[List[str]]
-
-# --- Logging Setup (Optional) ---
-logging.basicConfig(level=logging.DEBUG)
-log = logging.getLogger("GameSim")
-
-# --- Helper Functions ---
-
-
-def is_valid_coord(r, c, rows, cols):
-    """Checks if coordinates are within grid bounds."""
-    return 0 <= r < rows and 0 <= c < cols
-
-
-def get_neighbors(r, c, rows, cols) -> List[GridCoord]:
-    """Gets valid orthogonal neighbors."""
-    neighbors = []
-    for dr, dc in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-        nr, nc = r + dr, c + dc
-        if is_valid_coord(nr, nc, rows, cols):
-            neighbors.append((nr, nc))
-    return neighbors
-
-
-# --- Simulator Class ---
+LEVEL_1 = {
+    "mask": [
+        "##########",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "##########",
+    ]
+}
 
 
 class SevenWondersSimulator:
-    def __init__(self, level_config: Optional[Dict] = None):
-        """
-        Initializes the simulator.
-        level_config (dict, optional): Defines the level layout, goals, etc.
-                                        If None, uses default random setup.
-        """
-        self.rows = DEFAULT_GRID_ROWS
-        self.cols = DEFAULT_GRID_COLS
-        self.content: GridState = []
-        self.background: GridState = []
-        self.fragments_on_board: int = 0
-        self.fragments_collected: int = 0
-        self.target_fragments: int = 1  # Example default
-        self.total_initial_background_tiles: int = 0
-        self.background_destroyed_count: int = 0
-        self.bonus_activation_counter: int = 0  # Counts bonus_0/bonus_1 activations
+    def __init__(self, rows=config.GRID_ROWS, cols=config.GRID_COLS, level=LEVEL_1):
+        # Allow configurable size, but default to config
+        self.rows = rows
+        self.cols = cols
+        self.content = np.zeros((self.rows, self.cols), dtype=int)
+        self.background = np.zeros((self.rows, self.cols), dtype=int)
+        self.score = 0
+        self.bonus2_trigger_count = 0  # Counter for bonus_0/bonus_1 activations
+        self.initial_stones = 0
+        self.stones_cleared = 0
+        self.fragments_on_board = 0
+        self.max_fragments = 5  # Example limit
 
-        # RL specific state
-        self.current_score: int = 0
-        self.moves_made: int = 0
-        self.max_moves: Optional[int] = None  # Set by level_config if applicable
-        # Add time tracking if needed
+        # Map string names to integers using config
+        self.map_fg = config.MAP_FG  # {'empty':0, 'gem_0':1, …, 'bonus_2':12}
+        self.map_bg = config.MAP_BG  # {'none':0, 'stone':1, 'shield':2}
+        # Reverse map for debugging/display if needed
+        self.rev_map_fg = {v: k for k, v in self.map_fg.items()}
+        self.rev_map_bg = {v: k for k, v in self.map_bg.items()}
 
-        # Load level or use default
-        self._load_level(level_config)
-        log.info(f"Simulator initialized: {self.rows}x{self.cols} grid.")
+        # Define integer constants for easier access
+        self.EMPTY = self.map_fg["empty"]
+        self.FRAGMENT = self.map_fg["fragment"]
+        self.GEM_START_IDX = self.map_fg["gem_0"]
+        self.GEM_END_IDX = self.map_fg["gem_7"]
+        self.BONUS_0 = self.map_fg["bonus_0"]
+        self.BONUS_1 = self.map_fg["bonus_1"]
+        self.BONUS_2 = self.map_fg["bonus_2"]
+        self.BG_NONE = self.map_bg["none"]
+        self.BG_STONE = self.map_bg["stone"]
+        self.BG_SHIELD = self.map_bg["shield"]
 
-    def _load_level(self, config: Optional[Dict]):
-        """Sets up the board based on level config or defaults."""
-        # TODO: Implement proper level loading from config dict
-        # Config could specify: rows, cols, initial content, background,
-        # fragment positions, target_fragments, max_moves/time etc.
+        self.level = level  # store level
+        self.mask = None  # will be set in reset
 
-        # --- Default Random Initialization (Placeholder) ---
-        if config is None:
-            self.rows = DEFAULT_GRID_ROWS
-            self.cols = DEFAULT_GRID_COLS
-            self.content = [
-                [random.choice(GEM_TYPES) for _ in range(self.cols)]
-                for _ in range(self.rows)
-            ]
-            self.background = [
-                [random.choice([BG_STONE, BG_SHIELD]) for _ in range(self.cols)]
-                for _ in range(self.rows)
-            ]
-            # Add 1 fragment at top-middle (example)
-            frag_col = self.cols // 2
-            if (
-                self.content[0][frag_col] != FRAGMENT
-            ):  # Avoid overwriting if already there
-                self.content[0][frag_col] = FRAGMENT
-                self.fragments_on_board = 1
-            self.target_fragments = 1
+        self.reset()
 
-            # Ensure no initial matches (important!)
-            while self._get_matches(self.content):
-                log.debug(
-                    "Regenerating initial board to remove pre-existing matches..."
-                )
-                self.content = [
-                    [random.choice(GEM_TYPES) for _ in range(self.cols)]
-                    for _ in range(self.rows)
-                ]
-                # Re-add fragment
-                if self.content[0][frag_col] != FRAGMENT:
-                    self.content[0][frag_col] = FRAGMENT
-                    self.fragments_on_board = 1
+    def reset(self):
+        """Resets the board to a starting state."""
+        self.score = 0
+        self.bonus2_trigger_count = 0
+        self.stones_cleared = 0
+        self.fragments_on_board = 0
+        self.initial_stones = 0
 
-        else:
-            # --- Load from config ---
-            self.rows = config.get("rows", DEFAULT_GRID_ROWS)
-            self.cols = config.get("cols", DEFAULT_GRID_COLS)
-            # Load content (needs robust parsing)
-            self.content = config.get(
-                "content",
-                [
-                    [random.choice(GEM_TYPES) for _ in range(self.cols)]
-                    for _ in range(self.rows)
-                ],
-            )
-            # Load background
-            self.background = config.get(
-                "background",
-                [
-                    [random.choice([BG_STONE, BG_SHIELD]) for _ in range(self.cols)]
-                    for _ in range(self.rows)
-                ],
-            )
-            self.target_fragments = config.get("target_fragments", 1)
-            self.max_moves = config.get("max_moves", None)
-            # Count initial fragments and background tiles
-            self.fragments_on_board = sum(row.count(FRAGMENT) for row in self.content)
-            self.total_initial_background_tiles = sum(
-                1
-                for r in range(self.rows)
-                for c in range(self.cols)
-                if self.background[r][c] != BG_NONE
-                and self.background[r][c] != BG_BLOCKED
-            )
-            self.background_destroyed_count = 0  # Start fresh count
+        # --- Board Initialization ---
+        self._init_from_level(self.level)
 
-            # TODO: Add validation for loaded config (dimensions match, valid tiles)
-
-        self.fragments_collected = 0
-        self.current_score = 0
-        self.moves_made = 0
-        self.bonus_activation_counter = 0
-
-    def reset(self, level_config: Optional[Dict] = None) -> np.ndarray:
-        """Resets the simulator to the initial state of a level."""
-        self._load_level(level_config)
-        log.info("Game reset.")
         return self._get_state_representation()
 
-    def _get_state_representation(self) -> np.ndarray:
+    def _init_from_level(self, level_dict):
+        self.mask = np.ones((self.rows, self.cols), dtype=bool)
+        self.content = np.full((self.rows, self.cols), self.EMPTY, dtype=int)
+        self.background = np.full((self.rows, self.cols), self.BG_NONE, dtype=int)
+
+        for r, row in enumerate(level_dict["mask"]):
+            for c, ch in enumerate(row):
+                if ch == "#":
+                    self.mask[r, c] = False  # mark hole
+                    self.content[r, c] = self.EMPTY
+                    self.background[r, c] = self.BG_NONE
+                elif ch == "s":
+                    self.mask[r, c] = True
+                    self.content[r, c] = random.randint(
+                        self.GEM_START_IDX, self.GEM_END_IDX
+                    )
+                    self.background[r, c] = self.BG_SHIELD
+                elif ch == ".":
+                    self.mask[r, c] = True
+                    self.content[r, c] = random.randint(
+                        self.GEM_START_IDX, self.GEM_END_IDX
+                    )
+                    self.background[r, c] = self.BG_STONE
+                else:
+                    raise ValueError(f"Invalid level character: {ch}")
+
+        # Ensure no initial matches
+        while self._find_matches(self.content):
+            for r in range(self.rows):
+                for c in range(self.cols):
+                    if self.mask[r, c]:
+                        self.content[r, c] = random.randint(
+                            self.GEM_START_IDX, self.GEM_END_IDX
+                        )
+
+        self.initial_stones = np.sum(
+            (self.background == self.BG_STONE) | (self.background == self.BG_SHIELD)
+        )
+
+    def _is_valid_coord(self, r, c):
+        """Checks if coordinates are within the board bounds."""
+        return 0 <= r < self.rows and 0 <= c < self.cols
+
+    def _get_state_representation(self):
         """
-        Converts the current game state (content, background) into numerical format.
-        Returns a NumPy array, e.g., shape (2, rows, cols) for 2 channels.
-        Channel 0: Content (mapped to indices)
-        Channel 1: Background (mapped to indices)
+        Converts the current board state (content, background) into a numerical
+        representation suitable for the DQN agent (e.g., a multi-channel NumPy array).
+        Channels could represent:
+        - Content type (one-hot encoded or integer mapped)
+        - Background type
+        - Special properties (e.g., is_bonus, is_fragment)
         """
-        state_content = np.zeros((self.rows, self.cols), dtype=np.int8)
-        state_background = np.zeros((self.rows, self.cols), dtype=np.int8)
+        # Simple example: 2 channels (content index, background index)
+        # Normalize? Maybe later. DQN conv layers can learn scaling.
+        state = np.stack([self.content, self.background], axis=0).astype(np.float32)
+        # Shape: (2, self.rows, self.cols) - Matches QNetwork input_channels=2 expectation
+        return state
+
+    def _find_matches(self, board_content) -> Set[Tuple[int, int]]:
+        """
+        Finds all coordinates of gems involved in matches (3 or more).
+        Does NOT match bonuses or fragments.
+        Returns a set of (row, col) tuples.
+        """
+        matches = set()
+        gem_mask = (board_content >= self.GEM_START_IDX) & (
+            board_content <= self.GEM_END_IDX
+        )
 
         for r in range(self.rows):
             for c in range(self.cols):
-                state_content[r, c] = MAP_FG.get(
-                    self.content[r][c], 0
-                )  # Default to 0 (empty) if unknown
-                state_background[r, c] = MAP_BG.get(
-                    self.background[r][c], 0
-                )  # Default to 0 (none)
+                if not gem_mask[r, c]:
+                    continue  # Only match gems
 
-        # Stack channels: (channels, rows, cols)
-        # Add more channels if needed (e.g., fragment locations, goal progress)
-        return np.stack([state_content, state_background], axis=0)
-
-    def _simulate_swap(
-        self, grid: GridState, coord1: GridCoord, coord2: GridCoord
-    ) -> GridState:
-        """Creates a *new* grid with the swap applied. Does not modify original."""
-        new_grid = [row[:] for row in grid]  # Create a shallow copy
-        r1, c1 = coord1
-        r2, c2 = coord2
-        new_grid[r1][c1], new_grid[r2][c2] = new_grid[r2][c2], new_grid[r1][c1]
-        return new_grid
-
-    def _get_matches(self, grid: GridState) -> List[Set[GridCoord]]:
-        """
-        Finds all groups of 3+ matching tiles (non-empty, non-fragment)
-        horizontally and vertically.
-        Returns a list of sets, where each set contains the coordinates of a matched group.
-        Merges overlapping matches (e.g., L or T shapes).
-        """
-        matches: List[Set[GridCoord]] = []
-        if not grid:
-            return matches
-        rows, cols = len(grid), len(grid[0])
-        matched_coords = set()  # Track coords already part of a match
-
-        for r in range(rows):
-            for c in range(cols):
-                if (r, c) in matched_coords:
-                    continue
-                tile = grid[r][c]
-                if tile == EMPTY or tile == FRAGMENT:
-                    continue
+                gem_type = board_content[r, c]
 
                 # Check horizontal
-                h_match = {(r, c)}
-                nc = c + 1
-                while nc < cols and grid[r][nc] == tile:
-                    h_match.add((r, nc))
-                    nc += 1
-                if len(h_match) >= 3:
-                    matches.append(h_match)
-                    matched_coords.update(h_match)
+                h_len = 0
+                while (
+                    c + h_len < self.cols
+                    and gem_mask[r, c + h_len]
+                    and board_content[r, c + h_len] == gem_type
+                ):
+                    h_len += 1
+                if h_len >= 3:
+                    for i in range(h_len):
+                        matches.add((r, c + i))
 
                 # Check vertical
-                v_match = {(r, c)}
-                nr = r + 1
-                while nr < rows and grid[nr][c] == tile:
-                    v_match.add((nr, c))
-                    nr += 1
-                if len(v_match) >= 3:
-                    # Avoid adding duplicate single-coord if already in horizontal
-                    if (r, c) not in matched_coords or len(v_match) > 1:
-                        matches.append(v_match)
-                        matched_coords.update(v_match)
-
-        # --- Merge overlapping matches ---
-        if not matches:
-            return []
-
-        merged = True
-        while merged:
-            merged = False
-            merged_matches: List[Set[GridCoord]] = []
-            used = [False] * len(matches)
-            for i in range(len(matches)):
-                if used[i]:
-                    continue
-                current_merge = matches[i].copy()
-                used[i] = True
-                # Check against remaining matches for overlap
-                for j in range(i + 1, len(matches)):
-                    if not used[j] and not current_merge.isdisjoint(matches[j]):
-                        current_merge.update(matches[j])
-                        used[j] = True
-                        merged = True  # Signal that a merge happened
-                merged_matches.append(current_merge)
-            matches = merged_matches
-
-        log.debug(f"Found merged matches: {matches}")
+                v_len = 0
+                while (
+                    r + v_len < self.rows
+                    and gem_mask[r + v_len, c]
+                    and board_content[r + v_len, c] == gem_type
+                ):
+                    v_len += 1
+                if v_len >= 3:
+                    for i in range(v_len):
+                        matches.add((r + i, c))
         return matches
+
+    def _get_match_details(
+        self,
+        matches: Set[Tuple[int, int]],
+        swapped_loc: Optional[Tuple[int, int]] = None,
+    ) -> dict:
+        """
+        Classifies every connected match cluster into:
+            • 5_matches  → size ≥5 (straight or L/T)
+            • 4_matches  → size ==4 (straight)
+            • other_matches → size ==3
+        Also returns a sensible bonus placement coordinate.
+        """
+        details = {"4_matches": set(), "5_matches": set(), "other_matches": set()}
+        bonus_loc = None
+
+        for cluster in self._clusters(matches):
+            size = len(cluster)
+
+            # Measure max row‑run and col‑run inside this cluster
+            rows = defaultdict(int)
+            cols = defaultdict(int)
+            for r, c in cluster:
+                rows[r] += 1
+                cols[c] += 1
+            longest_row = max(rows.values())
+            longest_col = max(cols.values())
+
+            if size >= 5:  # could be straight‑5 OR L/T
+                details["5_matches"].update(cluster)
+            elif size == 4:
+                details["4_matches"].update(cluster)
+            else:
+                details["other_matches"].update(cluster)
+
+            # Choose a good bonus location for this cluster
+            if bonus_loc is None:  # take the first eligible cluster
+                if swapped_loc and swapped_loc in cluster:
+                    bonus_loc = swapped_loc
+                else:
+                    # Prefer the intersection of an L/T; otherwise the mid‑point
+                    inter = next(
+                        ((r, c) for (r, c) in cluster if rows[r] >= 3 and cols[c] >= 3),
+                        None,
+                    )
+                    if inter:
+                        bonus_loc = inter
+                    else:
+                        bonus_loc = next(iter(cluster))
+
+        details["bonus_loc"] = bonus_loc
+        return details
+
+    def _clusters(self, coords):
+        """Split a set of coordinates into 4‑connected clusters."""
+        coords = set(coords)
+        clusters = []
+        while coords:
+            q = deque([coords.pop()])
+            cluster = set()
+            while q:
+                r, c = q.popleft()
+                cluster.add((r, c))
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    neigh = (r + dr, c + dc)
+                    if neigh in coords:
+                        coords.remove(neigh)
+                        q.append(neigh)
+            clusters.append(cluster)
+        return clusters
 
     def get_valid_swaps(self) -> List[Swap]:
         """
-        Finds all valid swaps the player could make *now*.
-        A swap is valid if:
-        1. It involves two adjacent tiles.
-        2. Neither tile is a FRAGMENT.
-        3. The swap *results* in at least one match (3+ gems) OR activates a bonus tile.
-        Returns a list of valid Swap tuples ((r1, c1), (r2, c2)).
+        Return every legal swap the player can make.
+
+        Rules
+        -----
+        • Adjacent only (no diagonals).
+        • Tiles may NOT be EMPTY or FRAGMENT.
+        • If either tile is a BONUS (bonus_0, bonus_1, bonus_2) → the swap is
+        immediately valid (bonuses always fire when moved).
+        • Otherwise the swap must create ≥ 1 gem match.
         """
         valid_swaps: List[Swap] = []
-        processed_swaps = set()  # Avoid checking (a,b) and (b,a)
 
+        def is_swappable(r: int, c: int) -> bool:
+            """Can the tile at (r, c) take part in a swap?"""
+            if not self._is_valid_coord(r, c):
+                return False
+            # If you’re using a mask for holes, skip them
+            if not self.mask[r, c]:
+                return False
+            t = self.content[r, c]
+            return t != self.EMPTY and t != self.FRAGMENT
+
+        def is_bonus(tile_val: int) -> bool:
+            return self.BONUS_0 <= tile_val <= self.BONUS_2
+
+        # Iterate through every cell; consider right‑ and bottom‑ neighbour only → no duplicates
         for r in range(self.rows):
             for c in range(self.cols):
-                tile1 = self.content[r][c]
-                if (
-                    tile1 == FRAGMENT or tile1 == EMPTY
-                ):  # Fragments/Empty cannot be swapped
+                if not is_swappable(r, c):
                     continue
 
-                # Check neighbors (right and down to avoid duplicates)
-                for dr, dc in [(0, 1), (1, 0)]:
-                    nr, nc = r + dr, c + dc
-                    if not is_valid_coord(nr, nc, self.rows, self.cols):
-                        continue
+                # --- swap with right neighbour ---------------------------------
+                if c + 1 < self.cols and is_swappable(r, c + 1):
+                    t1, t2 = self.content[r, c], self.content[r, c + 1]
 
-                    tile2 = self.content[nr][nc]
-                    if (
-                        tile2 == FRAGMENT or tile2 == EMPTY
-                    ):  # Cannot swap with fragments/empty
-                        continue
+                    if is_bonus(t1) or is_bonus(t2):
+                        valid_swaps.append(((r, c), (r, c + 1)))
+                    else:
+                        # need to test for a resulting match
+                        self.content[r, c], self.content[r, c + 1] = t2, t1
+                        if self._find_matches(self.content):
+                            valid_swaps.append(((r, c), (r, c + 1)))
+                        # restore board
+                        self.content[r, c], self.content[r, c + 1] = t1, t2
 
-                    # Normalize swap coord pair for the processed check
-                    coord1 = (r, c)
-                    coord2 = (nr, nc)
-                    current_swap_normalized = tuple(sorted((coord1, coord2)))
-                    if current_swap_normalized in processed_swaps:
-                        continue
-                    processed_swaps.add(current_swap_normalized)
+                # --- swap with bottom neighbour -------------------------------
+                if r + 1 < self.rows and is_swappable(r + 1, c):
+                    t1, t2 = self.content[r, c], self.content[r + 1, c]
 
-                    # Check for Bonus Activation
-                    is_bonus_activation = False
-                    # Can swap a bonus with any Gem or another Bonus
-                    if (tile1 in BONUS_TYPES and tile2 in ALL_GEMS_AND_BONUSES) or (
-                        tile2 in BONUS_TYPES and tile1 in ALL_GEMS_AND_BONUSES
-                    ):
-                        is_bonus_activation = True
+                    if is_bonus(t1) or is_bonus(t2):
+                        valid_swaps.append(((r, c), (r + 1, c)))
+                    else:
+                        self.content[r, c], self.content[r + 1, c] = t2, t1
+                        if self._find_matches(self.content):
+                            valid_swaps.append(((r, c), (r + 1, c)))
+                        self.content[r, c], self.content[r + 1, c] = t1, t2
 
-                    # Simulate the swap and check for matches
-                    swapped_grid = self._simulate_swap(self.content, coord1, coord2)
-                    matches_after_swap = self._get_matches(swapped_grid)
-
-                    if is_bonus_activation or matches_after_swap:
-                        valid_swaps.append((coord1, coord2))
-                        # log.debug(f"  Found valid swap: {(coord1, coord2)} -> Bonus: {is_bonus_activation}, Match: {bool(matches_after_swap)}")
-
-        # log.info(f"Found {len(valid_swaps)} valid swaps.")
         return valid_swaps
 
-    def _apply_gravity_and_fill(self):
-        """
-        Applies gravity to tiles and fragments, then fills empty top cells.
-        Modifies self.content in place. Returns list of fallen fragment coords.
-        """
-        fallen_fragments: List[GridCoord] = []
-        new_content = [[EMPTY for _ in range(self.cols)] for _ in range(self.rows)]
+    def _apply_gravity(self):
+        """Moves tiles down to fill empty spaces. Fragments also fall."""
+        new_content = np.copy(self.content)
+        new_background = np.copy(self.background)
+        moved = False
 
         for c in range(self.cols):
-            write_row = self.rows - 1
-            # Process column from bottom up
+            write_idx = self.rows - 1
             for r in range(self.rows - 1, -1, -1):
-                tile = self.content[r][c]
-                if tile == EMPTY:
-                    continue
-                elif tile == FRAGMENT:
-                    # Fragment falls as far as possible
-                    fall_to_r = r
-                    while (
-                        fall_to_r + 1 < self.rows
-                        and new_content[fall_to_r + 1][c] == EMPTY
-                    ):
-                        fall_to_r += 1
-                    new_content[fall_to_r][c] = FRAGMENT
-                    if fall_to_r != r:
-                        fallen_fragments.append((fall_to_r, c))
-                    # Since we fill bottom-up, this space is now claimed
-                    write_row = min(
-                        write_row, fall_to_r - 1
-                    )  # Adjust next potential write pos
-                else:  # Gems or Bonuses
-                    # Find the lowest empty spot at or below current write_row
-                    place_r = write_row
-                    while (
-                        place_r + 1 < self.rows and new_content[place_r + 1][c] == EMPTY
-                    ):
-                        place_r += 1
-                    # Place tile if a valid spot is found within column bounds
-                    while place_r >= 0 and new_content[place_r][c] != EMPTY:
-                        place_r -= 1
-                    if place_r >= 0:
-                        new_content[place_r][c] = tile
-                        write_row = place_r - 1  # next tile goes above this one
-
-            # Fill remaining empty cells at the top with new random gems
-            for r in range(self.rows):
-                if new_content[r][c] == EMPTY:
-                    new_content[r][c] = random.choice(GEM_TYPES)
+                if new_content[r, c] != self.EMPTY:
+                    if r != write_idx:
+                        # Move content and background together
+                        new_content[write_idx, c] = new_content[r, c]
+                        new_background[write_idx, c] = new_background[r, c]
+                        new_content[r, c] = self.EMPTY
+                        new_background[r, c] = (
+                            self.BG_NONE
+                        )  # Ensure background is cleared too
+                        moved = True
+                    write_idx -= 1
+            # Fill remaining top spots with empty
+            while write_idx >= 0:
+                if new_content[write_idx, c] != self.EMPTY:
+                    new_content[write_idx, c] = self.EMPTY
+                    new_background[write_idx, c] = self.BG_NONE
+                    moved = True
+                write_idx -= 1
 
         self.content = new_content
-        return fallen_fragments
+        self.background = new_background
+        return moved
 
-    def _handle_background_break(self, coords: Set[GridCoord]) -> int:
-        """
-        Breaks background tiles at given coordinates.
-        Modifies self.background.
-        Returns the number of background tiles broken/damaged *in this step*.
-        """
-        broken_count_step = 0
-        for r, c in coords:
-            if not is_valid_coord(r, c, self.rows, self.cols):
-                continue
+    def _refill_board(self):
+        """Fills empty cells in the top row with new random gems."""
+        refilled = False
+        for c in range(self.cols):
+            # Check if the *topmost* cell in the column is empty after gravity
+            if self.content[0, c] == self.EMPTY:
+                # Need to find the actual top empty slot if gravity didn't fill column
+                top_empty_row = 0
+                while (
+                    top_empty_row < self.rows
+                    and self.content[top_empty_row, c] == self.EMPTY
+                ):
+                    # Spawn new tile (gem)
+                    new_gem = random.randint(self.GEM_START_IDX, self.GEM_END_IDX + 1)
+                    self.content[top_empty_row, c] = new_gem
+                    self.background[top_empty_row, c] = (
+                        self.BG_NONE
+                    )  # New tiles have no background
+                    refilled = True
+                    top_empty_row += (
+                        1  # Continue if multiple empty cells stacked at top
+                    )
 
-            bg = self.background[r][c]
-            if bg == BG_SHIELD:
-                self.background[r][c] = BG_STONE
-                broken_count_step += 1  # Count shield break as progress
-                log.debug(f"Background at {(r, c)}: Shield -> Stone")
-            elif bg == BG_STONE:
-                self.background[r][c] = BG_NONE
-                self.background_destroyed_count += 1
-                broken_count_step += 1
-                log.debug(f"Background at {(r, c)}: Stone -> None")
-                # Check for fragment spawning after breaking stone
-                self._check_fragment_spawn()
-        return broken_count_step
+        # --- Fragment Spawning Logic ---
+        stones_cleared_ratio = (
+            (self.stones_cleared / self.initial_stones)
+            if self.initial_stones > 0
+            else 0
+        )
+        # Example condition: Spawn a fragment if >50% stones cleared and below max fragments
+        if stones_cleared_ratio > 0.5 and self.fragments_on_board < self.max_fragments:
+            # Try to find an empty top spot to spawn
+            empty_top_cols = [
+                c for c in range(self.cols) if self.content[0, c] == self.EMPTY
+            ]
+            if empty_top_cols:
+                spawn_col = random.choice(empty_top_cols)
+                # Spawn fragment in the highest empty cell of that column
+                spawn_row = 0
+                while (
+                    spawn_row < self.rows
+                    and self.content[spawn_row, spawn_col] == self.EMPTY
+                ):
+                    spawn_row += 1
+                spawn_row -= 1  # Place in the last empty cell found from top
 
-    def _apply_bonus_effect(
-        self, bonus_type: str, r: int, c: int
-    ) -> Tuple[Set[GridCoord], Set[GridCoord]]:
+                if spawn_row >= 0:  # Make sure we found an empty spot
+                    self.content[spawn_row, spawn_col] = self.FRAGMENT
+                    self.background[spawn_row, spawn_col] = (
+                        self.BG_NONE
+                    )  # Fragments have no background? Assume so.
+                    self.fragments_on_board += 1
+                    refilled = True
+                    # Optional: Reset stone clear count or use a different trigger mechanism
+                    # self.stones_cleared = 0 # Reset count after spawning? Depends on game rules.
+
+        return refilled
+
+    def _activate_bonus(self, r, c) -> Tuple[Set[Tuple[int, int]], Optional[int], int]:
         """
-        Applies the effect of a triggered bonus.
+        Determines the effect of activating a bonus at (r, c).
         Returns:
-            - Set of coordinates cleared by the bonus (excluding the bonus tile itself).
-            - Set of coordinates of other bonuses triggered by this bonus.
+            - Set of affected coordinates (excluding the bonus itself).
+            - Type of next bonus activated (if any).
+            - Bonus trigger count increment (1 for B0/B1, 0 otherwise).
         """
-        cleared_coords: Set[GridCoord] = set()
-        triggered_bonus_coords: Set[GridCoord] = set()
+        bonus_type = self.content[r, c]
+        affected_coords = set()
+        next_activated_bonus_type = None
+        bonus_trigger_inc = 0
 
-        # Mark bonus tile itself as cleared (will be removed later)
-        # cleared_coords.add((r, c)) # No, don't add self to cleared, it's handled separately
-
-        if bonus_type == BONUS_0:  # Row Clear
-            log.debug(f"Activating Bonus_0 (Row Clear) at {(r, c)}")
-            self.bonus_activation_counter += 1
-            for col_idx in range(self.cols):
-                if (r, col_idx) != (
-                    r,
-                    c,
-                ):  # don't clear self with own effect, avoid fragment
-                    coord = (r, col_idx)
-                    tile = self.content[r][col_idx]
-                    if tile != FRAGMENT and tile != EMPTY:
-                        cleared_coords.add(coord)
-                        if tile in BONUS_TYPES:
-                            triggered_bonus_coords.add(coord)
-
-        elif bonus_type == BONUS_1:  # Plus Clear
-            log.debug(f"Activating Bonus_1 (Plus Clear) at {(r, c)}")
-            self.bonus_activation_counter += 1
-            # Row
-            for col_idx in range(self.cols):
-                if (r, col_idx) != (r, c):
-                    coord = (r, col_idx)
-                    tile = self.content[r][col_idx]
-                    if tile != FRAGMENT and tile != EMPTY:
-                        cleared_coords.add(coord)
-                        if tile in BONUS_TYPES:
-                            triggered_bonus_coords.add(coord)
-            # Column
-            for row_idx in range(self.rows):
-                if (row_idx, c) != (r, c):
-                    coord = (row_idx, c)
-                    tile = self.content[row_idx][c]
-                    if tile != FRAGMENT and tile != EMPTY:
-                        cleared_coords.add(coord)
-                        if tile in BONUS_TYPES:
-                            # Avoid double adding if row/col intersect on another bonus
-                            triggered_bonus_coords.add(coord)
-
-        elif bonus_type == BONUS_2:  # Random Clear
-            log.debug(f"Activating Bonus_2 (Random Clear) at {(r, c)}")
-            # (No increment for bonus_activation_counter for Bonus_2)
-            num_to_clear = random.randint(15, 20)
-            potential_targets = []
+        if bonus_type == self.BONUS_0:  # Row clear
+            bonus_trigger_inc = 1
+            for col in range(self.cols):
+                if col != c:  # Don't affect self initially
+                    affected_coords.add((r, col))
+        elif bonus_type == self.BONUS_1:  # Plus clear
+            bonus_trigger_inc = 1
+            for col in range(self.cols):  # Row
+                if col != c:
+                    affected_coords.add((r, col))
+            for row in range(self.rows):  # Column
+                if row != r:
+                    affected_coords.add((row, c))
+        elif bonus_type == self.BONUS_2:  # Random clear
+            # Find all clearable tiles (non-empty, non-fragment, non-bonus)
+            clearable = []
             for rr in range(self.rows):
                 for cc in range(self.cols):
-                    if (rr, cc) != (r, c):  # don't clear self
-                        tile = self.content[rr][cc]
-                        # Cannot clear fragments or other bonuses or empty
-                        if (
-                            tile != FRAGMENT
-                            and tile not in BONUS_TYPES
-                            and tile != EMPTY
-                        ):
-                            potential_targets.append((rr, cc))
+                    tile = self.content[rr, cc]
+                    if (
+                        tile != self.EMPTY
+                        and tile != self.FRAGMENT
+                        and not (self.BONUS_0 <= tile <= self.BONUS_2)
+                    ):
+                        clearable.append((rr, cc))
 
-            random.shuffle(potential_targets)
-            cleared_coords.update(potential_targets[:num_to_clear])
-            # Bonus_2 does not trigger other bonuses
+            num_to_clear = random.randint(15, 20)
+            random.shuffle(clearable)
+            affected_coords.update(clearable[:num_to_clear])
 
-        # Check if activating Bonus_0 or Bonus_1 triggers Bonus_2 creation
-        if (
-            bonus_type in [BONUS_0, BONUS_1]
-            and self.bonus_activation_counter % 4 == 0
-            and self.bonus_activation_counter > 0
-        ):
-            self._spawn_bonus(BONUS_2)  # Spawn AFTER current effects resolve
+        # Check affected coords for other bonuses to chain activate
+        activated_bonuses_coords = set()
+        for ar, ac in list(affected_coords):  # Iterate copy as we might modify
+            if not self._is_valid_coord(ar, ac):
+                continue
+            affected_tile = self.content[ar, ac]
+            if self.BONUS_0 <= affected_tile <= self.BONUS_2:
+                # Add to chain reaction list, remove from direct clear list
+                activated_bonuses_coords.add((ar, ac))
+                affected_coords.remove((ar, ac))
 
-        log.debug(
-            f"Bonus effect: Cleared {cleared_coords}, Triggered Bonuses {triggered_bonus_coords}"
-        )
-        return cleared_coords, triggered_bonus_coords
+        return affected_coords, activated_bonuses_coords, bonus_trigger_inc
 
-    def _spawn_bonus(self, bonus_type: str):
-        """Spawns a bonus (usually Bonus_2) at a suitable top location."""
-        spawn_options = []
-        for c in range(self.cols):
-            # Find the highest empty cell in the column
-            highest_empty_r = -1
-            for r in range(self.rows):
-                if self.content[r][c] == EMPTY:
-                    highest_empty_r = r
-                    break  # Found the highest one
-            if highest_empty_r != -1:
-                spawn_options.append((highest_empty_r, c))
-
-        if spawn_options:
-            r, c = random.choice(spawn_options)
-            self.content[r][c] = bonus_type
-            log.info(f"Spawned {bonus_type} at {(r, c)}")
-        else:
-            log.warning(f"Could not find empty space to spawn {bonus_type}!")
-
-    def _check_fragment_spawn(self):
-        """Checks if conditions are met to spawn a new fragment."""
-        if self.total_initial_background_tiles == 0:
-            return  # Avoid division by zero
-
-        if (
-            self.background_destroyed_count / self.total_initial_background_tiles
-        ) > 0.5:
-            # Check if we *already* spawned for this threshold (simple flag for now)
-            # A more robust way might be to track how many *should* have spawned vs how many *have*
-            if (
-                not hasattr(self, "_fragment_spawned_50pct")
-                or not self._fragment_spawned_50pct
-            ):
-                log.info("Over 50% background cleared, attempting to spawn fragment.")
-                self._spawn_fragment()
-                self._fragment_spawned_50pct = (
-                    True  # Mark as spawned for this threshold
-                )
-
-    def _spawn_fragment(self):
-        """Spawns a fragment at a suitable top location."""
-        spawn_options = []
-        for c in range(self.cols):
-            highest_empty_r = -1
-            for r in range(self.rows):
-                if self.content[r][c] == EMPTY:
-                    highest_empty_r = r
-                    break
-            if highest_empty_r != -1:
-                spawn_options.append((highest_empty_r, c))
-
-        if spawn_options:
-            r, c = random.choice(spawn_options)
-            self.content[r][c] = FRAGMENT
-            self.fragments_on_board += 1
-            log.info(
-                f"Spawned Fragment at {(r, c)}. Fragments on board: {self.fragments_on_board}"
-            )
-        else:
-            log.warning("Could not find empty space to spawn Fragment!")
-
-    def _check_completion_and_failure(self) -> Tuple[bool, int]:
+    def step(self, swap_action: Swap):
         """
-        Checks if the level is won (all fragments collected) or lost (no moves).
-        Returns: (done, final_reward_penalty)
+        Performs the swap action, resolves all cascades, and returns the result.
         """
-        # 1. Check Win Condition
-        if self.fragments_collected >= self.target_fragments:
-            log.info(
-                f"Level Complete! Collected {self.fragments_collected}/{self.target_fragments} fragments."
-            )
-            return True, 1000  # Large positive reward for winning
-
-        # 2. Check Lose Condition - No Valid Moves
-        # Note: Only check if not already won
-        if not self.get_valid_swaps():
-            log.info("Level Failed! No more valid moves.")
-            return True, -500  # Large negative penalty for losing
-
-        # 3. Check Lose Condition - Max Moves (if applicable)
-        if self.max_moves is not None and self.moves_made >= self.max_moves:
-            log.info(f"Level Failed! Exceeded max moves ({self.max_moves}).")
-            return True, -500  # Large negative penalty
-
-        # TODO: Add time limit check if needed
-
-        # 4. Game continues
-        return False, 0
-
-    def step(self, swap_action: Swap) -> Tuple[np.ndarray, int, bool]:
-        """
-        Executes a swap action, resolves cascades, and updates the game state.
-        Args:
-            swap_action: A tuple ((r1, c1), (r2, c2)) representing the swap.
-        Returns:
-            - new_state: The state representation after the step.
-            - step_reward: The reward accumulated during this step (swap + cascades).
-            - done: Boolean indicating if the game ended (win or loss).
-        """
-        self.moves_made += 1
+        (r1, c1), (r2, c2) = swap_action
         step_reward = 0
         done = False
-        final_reward_penalty = 0
 
-        coord1, coord2 = swap_action
-        r1, c1 = coord1
-        r2, c2 = coord2
-
-        # --- Validate Swap (Basic - should be pre-validated by agent ideally) ---
-        # Is it a known valid swap according to get_valid_swaps?
-        # Or at least, check basic rules here again? For robustness:
-        if not (
-            is_valid_coord(r1, c1, self.rows, self.cols)
-            and is_valid_coord(r2, c2, self.rows, self.cols)
-            and abs(r1 - r2) + abs(c1 - c2) == 1  # Adjacent
-            and self.content[r1][c1] != FRAGMENT
-            and self.content[r2][c2] != FRAGMENT
-            and self.content[r1][c1] != EMPTY
-            and self.content[r2][c2] != EMPTY
-        ):
-            log.error(f"Invalid swap attempted in step: {swap_action}")
-            # Return current state, large penalty, and potentially end the game?
-            # Or just penalty and no state change? Let's do penalty, no state change.
+        # --- 1. Validate and Perform Swap ---
+        # Basic check (more thorough check in get_valid_swaps)
+        if not (self._is_valid_coord(r1, c1) and self._is_valid_coord(r2, c2)):
+            print(f"Warning: Invalid swap coordinates {swap_action}")
             return (
                 self._get_state_representation(),
                 -100,
-                False,
-            )  # Small penalty for invalid action attempt
+                True,
+            )  # Penalize invalid action heavily
 
-        log.debug(f"\n--- Step {self.moves_made}: Applying Swap {swap_action} ---")
+        t1 = self.content[r1, c1]
+        t2 = self.content[r2, c2]
+        if (
+            t1 == self.FRAGMENT
+            or t2 == self.FRAGMENT
+            or t1 == self.EMPTY
+            or t2 == self.EMPTY
+        ):
+            print(f"Warning: Invalid swap involving Fragment/Empty {swap_action}")
+            return self._get_state_representation(), -100, True  # Penalize invalid swap
 
-        # --- 1. Apply the Swap ---
-        tile1_before = self.content[r1][c1]
-        tile2_before = self.content[r2][c2]
-        self.content[r1][c1], self.content[r2][c2] = (
-            self.content[r2][c2],
-            self.content[r1][c1],
-        )
-        step_reward -= 1  # Small cost per move
+        self.content[r1, c1], self.content[r2, c2] = t2, t1
+        self.background[r1, c1], self.background[r2, c2] = (
+            self.background[r2, c2],
+            self.background[r1, c1],
+        )  # Swap background too? Assume yes.
 
-        # --- Cascade Loop ---
-        cascade_level = 0
+        # Keep track of the location where a potential generated bonus should appear
+        # One of the two swapped locations is a good candidate
+        potential_bonus_spawn_loc = (r1, c1)  # Arbitrary choice
+
+        # Small penalty for taking a step? Or reward based on outcome?
+        step_reward -= 1  # Small penalty encourages efficiency
+
+        # --- 2. Cascade Loop ---
+        cascade_bonus_trigger_count = 0
+
+        # Store bonuses activated *during* the cascade to process in the *next* iteration
+        bonuses_to_activate_next = set()
+
         while True:
-            cascade_level += 1
-            log.debug(f"--- Cascade Level {cascade_level} ---")
+            coords_cleared_this_iter = set()
+            coords_to_break_bg = set()
 
-            # --- 2a. Find Matches and Activated Bonuses ---
-            current_matches = self._get_matches(self.content)
-            activated_bonuses: Dict[GridCoord, str] = (
-                {}
-            )  # Store coords and types of bonuses activated this cycle
+            # --- A. Process Activated Bonuses (from previous iteration) ---
+            activated_bonuses_coords_this_iter = set()  # To check for B2 trigger
+            if bonuses_to_activate_next:
+                current_bonuses_to_process = bonuses_to_activate_next.copy()
+                bonuses_to_activate_next.clear()
 
-            # Check if the initial swap activated a bonus directly
-            # (Needs careful check to avoid double counting if swap *also* creates match)
-            swap_activated_bonus = False
-            if cascade_level == 1:  # Only check on the first cycle after the swap
-                if tile1_before in BONUS_TYPES and tile2_before in ALL_GEMS_AND_BONUSES:
-                    activated_bonuses[(r1, c1)] = (
-                        tile1_before  # Bonus ended up at (r1, c1) after swap
+                for br, bc in current_bonuses_to_process:
+                    if not self._is_valid_coord(br, bc) or not (
+                        self.BONUS_0 <= self.content[br, bc] <= self.BONUS_2
+                    ):
+                        continue  # Bonus might have been cleared already
+
+                    # Mark bonus location itself for clearing and background break
+                    coords_cleared_this_iter.add((br, bc))
+                    coords_to_break_bg.add((br, bc))
+
+                    affected_coords, chained_bonuses, trigger_inc = (
+                        self._activate_bonus(br, bc)
                     )
-                    swap_activated_bonus = True
-                elif (
-                    tile2_before in BONUS_TYPES and tile1_before in ALL_GEMS_AND_BONUSES
-                ):
-                    activated_bonuses[(r2, c2)] = (
-                        tile2_before  # Bonus ended up at (r2, c2) after swap
-                    )
-                    swap_activated_bonus = True
+                    activated_bonuses_coords_this_iter.add(
+                        (br, bc)
+                    )  # Record which bonus was activated
 
-            # Find coords involved in current gem matches
-            matched_coords_this_cycle: Set[GridCoord] = (
-                set().union(*current_matches) if current_matches else set()
-            )
+                    # Add affected non-fragment tiles to clear/break lists
+                    for ar, ac in affected_coords:
+                        if (
+                            self._is_valid_coord(ar, ac)
+                            and self.content[ar, ac] != self.FRAGMENT
+                        ):
+                            coords_cleared_this_iter.add((ar, ac))
+                            coords_to_break_bg.add((ar, ac))
 
-            # Identify bonuses *within* matched groups (they activate too)
-            for r_match, c_match in matched_coords_this_cycle:
-                tile = self.content[r_match][c_match]
-                if tile in BONUS_TYPES:
-                    if (
-                        r_match,
-                        c_match,
-                    ) not in activated_bonuses:  # Avoid double activation
-                        activated_bonuses[(r_match, c_match)] = tile
+                    bonuses_to_activate_next.update(
+                        chained_bonuses
+                    )  # Add chained bonuses for the *next* iteration
+                    cascade_bonus_trigger_count += trigger_inc
+                    step_reward += 5  # Reward for activating a bonus
 
-            # --- 2b. Exit if No Matches or Bonus Activations ---
-            if not current_matches and not activated_bonuses:
-                log.debug("No more matches or bonus activations found. Ending cascade.")
-                break  # Exit cascade loop
+            # --- B. Find Gem Matches ---
+            matches = self._find_matches(self.content)
 
-            # --- Process Activations and Matches ---
-            all_cleared_coords: Set[GridCoord] = set()  # All tiles removed this cycle
-            all_triggered_bonuses: Set[GridCoord] = (
-                set()
-            )  # Bonuses activated by other bonuses
+            # Stop condition: No matches found AND no bonuses were activated in this iteration
+            if not matches and not activated_bonuses_coords_this_iter:
+                # Check if there were bonuses queued for next iter; if so, continue
+                if not bonuses_to_activate_next:
+                    break  # End cascade
 
-            # Apply bonus effects FIRST (they might clear gems needed for matches)
-            bonuses_to_process = list(activated_bonuses.items())
-            processed_bonus_coords = set()
+            # --- C. Process Matches ---
+            if matches:
+                # Determine match details (4-match, 5-match) for bonus generation
+                # Pass one of the swapped locs if it was part of the match, else None
+                swapped_loc_in_match = None
+                if (r1, c1) in matches:
+                    swapped_loc_in_match = (r1, c1)
+                elif (r2, c2) in matches:
+                    swapped_loc_in_match = (r2, c2)
 
-            while bonuses_to_process:
-                (br, bc), b_type = bonuses_to_process.pop(0)
-                if (br, bc) in processed_bonus_coords:
-                    continue  # Avoid reprocessing chained bonuses in same cycle
+                match_details = self._get_match_details(matches, swapped_loc_in_match)
 
-                log.debug(f"Processing activated bonus {b_type} at {(br, bc)}")
-                step_reward += 25  # Reward for activating a bonus
-                all_cleared_coords.add((br, bc))  # The bonus itself is cleared
-                processed_bonus_coords.add((br, bc))
+                bonus_spawn_loc = potential_bonus_spawn_loc  # Use the initial swap location as default
+                if match_details[
+                    "bonus_loc"
+                ]:  # Prefer location derived from match analysis
+                    bonus_spawn_loc = match_details["bonus_loc"]
 
-                cleared_by_bonus, triggered_by_bonus = self._apply_bonus_effect(
-                    b_type, br, bc
-                )
-                all_cleared_coords.update(cleared_by_bonus)
-                all_triggered_bonuses.update(triggered_by_bonus)
+                # Add matched coordinates to clear/break lists
+                coords_cleared_this_iter.update(matches)
+                coords_to_break_bg.update(matches)
 
-                # Add newly triggered bonuses to the processing list
-                for tr, tc in triggered_by_bonus:
-                    if (tr, tc) not in processed_bonus_coords and (tr, tc) not in [
-                        p[0] for p in bonuses_to_process
-                    ]:
-                        triggered_type = self.content[tr][tc]
-                        if triggered_type in BONUS_TYPES:  # Should always be true
-                            bonuses_to_process.append(((tr, tc), triggered_type))
+                step_reward += len(matches) * 2  # Reward per matched gem
 
-            # Now add gem match coordinates (excluding already cleared/activated bonuses)
-            final_match_coords = matched_coords_this_cycle - processed_bonus_coords
-            all_cleared_coords.update(final_match_coords)
-
-            # --- 2c/f. Calculate Rewards (Matches, Background Breaks) ---
-            # Reward for matched gems
-            step_reward += len(final_match_coords) * 2  # Base reward per gem
-            # Reward for background breaks (applies to all cleared coords)
-            broken_count = self._handle_background_break(all_cleared_coords)
-            step_reward += broken_count * 10
-
-            # --- Create New Bonuses from Matches ---
-            new_bonuses_coords: Dict[GridCoord, str] = {}
-            if (
-                not swap_activated_bonus
-            ):  # Don't create bonus if swap just activated one
-                for match_set in current_matches:
-                    # Ensure the match involves coords from the *original* swap
-                    # OR entstand purely from falling tiles (more complex check needed?)
-                    # Simplification: Check match size, place at swap loc if relevant
-                    match_involved_swap = coord1 in match_set or coord2 in match_set
-                    if (
-                        cascade_level == 1 and match_involved_swap
-                    ):  # only first cascade level and involving swap
-                        if len(match_set) >= 5:
-                            # Check if coord1 is available and not already cleared by bonus
-                            if coord1 not in all_cleared_coords:
-                                new_bonuses_coords[coord1] = BONUS_1
-                            # else maybe place at coord2? Needs careful logic
-                            log.debug(
-                                f"Creating Bonus_1 at {coord1} from {len(match_set)}-match"
-                            )
-                            step_reward += 50
-                            break  # Only create one bonus per initiating match group? Assume yes.
-                        elif len(match_set) == 4:
-                            if coord1 not in all_cleared_coords:
-                                new_bonuses_coords[coord1] = BONUS_0
-                            log.debug(f"Creating Bonus_0 at {coord1} from 4-match")
-                            step_reward += 30
-                            break  # Only one bonus
-
-            # --- 2d/e. Remove Tiles & Place New Bonuses ---
-            log.debug(f"Clearing coords: {all_cleared_coords}")
-            for r_clear, c_clear in all_cleared_coords:
-                if (r_clear, c_clear) in new_bonuses_coords:
-                    self.content[r_clear][c_clear] = new_bonuses_coords[
-                        (r_clear, c_clear)
-                    ]
-                    log.debug(
-                        f"Placed new {new_bonuses_coords[(r_clear, c_clear)]} at {(r_clear, c_clear)}"
-                    )
-                else:
-                    self.content[r_clear][c_clear] = EMPTY
-
-            # --- 2h/i. Apply Gravity and Fill ---
-            fallen_fragments_coords = self._apply_gravity_and_fill()
-            log.debug("Applied gravity and filled top rows.")
-
-            # --- Check Fragment Collection ---
-            fragments_collected_this_step = 0
-            for r_frag, c_frag in fallen_fragments_coords:
+                # --- D. Generate Bonuses (Overwrite one cleared tile) ---
+                # Prioritize 5-match over 4-match if location overlaps
+                generated_bonus_type = None
                 if (
-                    r_frag == self.rows - 1
-                    and self.background[r_frag][c_frag] == BG_NONE
+                    match_details["5_matches"]
+                    and bonus_spawn_loc in match_details["5_matches"]
                 ):
-                    # Fragment reached bottom on a cleared background cell
-                    if (
-                        self.content[r_frag][c_frag] == FRAGMENT
-                    ):  # Verify it's still there
-                        self.content[r_frag][
-                            c_frag
-                        ] = EMPTY  # Remove collected fragment
-                        self.fragments_on_board -= 1
-                        self.fragments_collected += 1
-                        fragments_collected_this_step += 1
-                        log.info(
-                            f"Fragment collected at {(r_frag, c_frag)}! Total: {self.fragments_collected}/{self.target_fragments}"
-                        )
+                    generated_bonus_type = self.BONUS_1
+                    step_reward += 20  # Larger reward for creating bonus 1
+                elif (
+                    match_details["4_matches"]
+                    and bonus_spawn_loc in match_details["4_matches"]
+                ):
+                    generated_bonus_type = self.BONUS_0
+                    step_reward += 10  # Reward for creating bonus 0
 
-            if fragments_collected_this_step > 0:
-                step_reward += (
-                    fragments_collected_this_step * 500
-                )  # Large reward per fragment
+                # If a bonus was generated, place it (it replaces the cleared tile)
+                if generated_bonus_type is not None:
+                    self.content[bonus_spawn_loc] = generated_bonus_type
+                    # Ensure this location isn't immediately cleared again in this iteration
+                    coords_cleared_this_iter.discard(bonus_spawn_loc)
+                    coords_to_break_bg.discard(bonus_spawn_loc)
 
-            # --- Loop continues to check for new matches caused by falling tiles ---
+            # --- E. Clear Tiles and Break Backgrounds ---
+            temp_stones_cleared_count = 0
+            for r_cl, c_cl in coords_cleared_this_iter:
+                if not self._is_valid_coord(r_cl, c_cl):
+                    continue
 
-        # --- End of Cascade Loop ---
+                # Clear content (unless it's a newly generated bonus - handled above)
+                # Don't clear bonuses that are scheduled for activation next iter
+                if (r_cl, c_cl) not in bonuses_to_activate_next:
+                    self.content[r_cl, c_cl] = self.EMPTY
 
-        # --- 4/5. Check for Level Completion or Failure ---
-        done, final_reward_penalty = self._check_completion_and_failure()
-        step_reward += final_reward_penalty
+            for r_bg, c_bg in coords_to_break_bg:
+                if not self._is_valid_coord(r_bg, c_bg):
+                    continue
+                bg_type = self.background[r_bg, c_bg]
+                if bg_type == self.BG_SHIELD:
+                    self.background[r_bg, c_bg] = self.BG_STONE
+                    step_reward += 3  # Reward for breaking shield
+                elif bg_type == self.BG_STONE:
+                    self.background[r_bg, c_bg] = self.BG_NONE
+                    step_reward += 5  # Reward for breaking stone
+                    temp_stones_cleared_count += 1
 
-        # --- 7. Get New State ---
-        new_state = self._get_state_representation()
+            self.stones_cleared += temp_stones_cleared_count
 
-        log.debug(
-            f"Step {self.moves_made} finished. Reward: {step_reward}, Done: {done}"
-        )
-        # log.debug(f"Board Content:\n{self._grid_to_string(self.content)}")
-        # log.debug(f"Board Background:\n{self._grid_to_string(self.background)}")
+            # --- F+G. Apply Gravity and Refill ---
+            # Apply gravity repeatedly until no more tiles move
+            while self._apply_gravity():
+                pass
+            refilled = self._refill_board()  # Refill includes fragment spawning check
 
-        return new_state, step_reward, done
+            # Add any newly spawned bonuses (e.g. B2) to activate next cycle
+            # Check for B2 Trigger
+            self.bonus2_trigger_count += (
+                cascade_bonus_trigger_count  # Add count from B0/B1 activated this step
+            )
+            cascade_bonus_trigger_count = (
+                0  # Reset for next potential cascade iteration
+            )
+            if self.bonus2_trigger_count >= 4:
+                self.bonus2_trigger_count %= 4  # Reset counter
+                # Spawn Bonus 2 - Where? Random empty? Replace a gem? Rule needed.
+                # Simple approach: Find a random non-empty, non-fragment, non-bonus spot
+                possible_b2_locs = []
+                for r_b2 in range(self.rows):
+                    for c_b2 in range(self.cols):
+                        tile = self.content[r_b2, c_b2]
+                        if (
+                            tile != self.EMPTY
+                            and tile != self.FRAGMENT
+                            and not (self.BONUS_0 <= tile <= self.BONUS_2)
+                        ):
+                            possible_b2_locs.append((r_b2, c_b2))
+                if possible_b2_locs:
+                    b2_r, b2_c = random.choice(possible_b2_locs)
+                    self.content[b2_r, b2_c] = self.BONUS_2
+                    # Add it to be activated in the next iteration
+                    bonuses_to_activate_next.add((b2_r, b2_c))
+                    step_reward += 15  # Reward for triggering B2
 
-    def _grid_to_string(self, grid):
-        """Helper for debugging: formats grid for printing."""
-        if not grid:
-            return "[]"
-        return "\n".join(
-            [" ".join([f"{str(cell):<9}" for cell in row]) for row in grid]
-        )
+            # If board was refilled, need to check for new matches in the next loop iteration
+            if (
+                not refilled
+                and not matches
+                and not activated_bonuses_coords_this_iter
+                and not bonuses_to_activate_next
+            ):
+                break  # Absolutely nothing happened and nothing pending
 
-    def render(self):
-        """Optional: Basic text-based rendering for debugging."""
-        print("\n--- Current State ---")
-        print(f"Moves: {self.moves_made}/{self.max_moves if self.max_moves else 'inf'}")
-        print(f"Score: {self.current_score}")  # Score not really used yet
+        # --- 3. After Cascade: Check Game End Conditions ---
+        self.score += step_reward  # Add accumulated step reward to total score
+
+        # Win Condition: Example - all background tiles cleared
+        if np.all(self.background == self.BG_NONE):
+            done = True
+            step_reward += 1000  # Large reward for winning
+            self.score += 1000
+            print("\n--- Level Cleared! ---")
+        else:
+            # Lose Condition: No valid swaps left
+            valid_swaps = self.get_valid_swaps()
+            if not valid_swaps:
+                done = True
+                step_reward -= 500  # Large penalty for getting stuck
+                self.score -= 500
+                print("\n--- No Valid Moves! Game Over ---")
+                # Implement shuffle or just end episode? Ending is simpler for RL.
+
+        # --- 4. Return New State, Reward, Done ---
+        next_state = self._get_state_representation()
+        return next_state, step_reward, done
+
+    # --- Optional: Helper for Display ---
+    def display(self):
+        """Prints a textual representation of the board."""
+        for r in range(self.rows):
+            row_str_fg = " ".join(
+                f"{self.rev_map_fg[self.content[r, c]]:<9}" for c in range(self.cols)
+            )
+            row_str_bg = " ".join(
+                f"{self.rev_map_bg[self.background[r, c]]:<9}" for c in range(self.cols)
+            )
+            print(f"FG: {row_str_fg}  | BG: {row_str_bg}")
         print(
-            f"Fragments: {self.fragments_collected}/{self.target_fragments} (On Board: {self.fragments_on_board})"
+            f"Score: {self.score}, Stones Cleared: {self.stones_cleared}/{self.initial_stones}, Fragments: {self.fragments_on_board}"
         )
-        print(
-            f"Background Cleared: {self.background_destroyed_count}/{self.total_initial_background_tiles}"
-        )
-        print("Content:")
-        print(self._grid_to_string(self.content))
-        print("Background:")
-        print(self._grid_to_string(self.background))
         print("-" * 20)
 
 
-# Example Usage (for testing)
+# --- Example Usage (for testing) ---
 if __name__ == "__main__":
     sim = SevenWondersSimulator()
-    sim.render()
+    print("Initial Board:")
+    sim.display()
 
-    # Try getting valid swaps
-    valid_swaps = sim.get_valid_swaps()
-    print(f"Initial valid swaps: {valid_swaps}")
+    done = False
+    step_count = 0
+    max_steps = 50
 
-    if valid_swaps:
-        # Take the first valid swap
-        swap_to_try = valid_swaps[0]
-        print(f"\nAttempting swap: {swap_to_try}")
-        new_state, reward, done = sim.step(swap_to_try)
+    while not done and step_count < max_steps:
+        print(f"\n--- Step {step_count + 1} ---")
+        valid_swaps = sim.get_valid_swaps()
+        print(f"Found {len(valid_swaps)} valid swaps.")
 
-        print(f"\nAfter first step:")
-        sim.render()
-        print(f"Reward: {reward}, Done: {done}")
+        if not valid_swaps:
+            print("No valid moves found by simulation.")
+            break
 
-        # Simulate a few more random valid moves
-        for i in range(5):
-            if done:
-                break
-            print(f"\n--- Turn {i+2} ---")
-            valid_swaps = sim.get_valid_swaps()
-            if not valid_swaps:
-                print("No more valid moves!")
-                break
-            swap_to_try = random.choice(valid_swaps)
-            print(f"Attempting swap: {swap_to_try}")
-            new_state, reward, done = sim.step(swap_to_try)
-            sim.render()
-            print(f"Reward: {reward}, Done: {done}")
+        # Choose a random valid swap for testing
+        action = random.choice(valid_swaps)
+        print(f"Performing random valid swap: {action}")
 
+        new_state, reward, done = sim.step(action)
+
+        print(f"Reward received: {reward}")
+        print("Board after step:")
+        sim.display()
+        step_count += 1
+
+    print("\nSimulation finished.")
+    if done:
+        print("Game ended.")
     else:
-        print("No valid moves possible on initial board.")
+        print("Max steps reached.")
