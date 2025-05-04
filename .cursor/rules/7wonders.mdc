@@ -1,0 +1,10 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+For this project we will build AI that play this game:
+
+7 Wonders" Puzzle Game — Core Gameplay Specifications and Logic 
+Game Summary: "7 Wonders" is a tile-matching puzzle game where players must remove groups of adjacent tiles of the same type (color). The goal is to break tiles behind the matched groups to allow fragments of ancient wonders to drop to the bottom of the grid. Each level is complete when all fragments have been dropped and all tiles is broken.
+
