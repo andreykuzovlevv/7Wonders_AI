@@ -438,38 +438,96 @@ class SevenWondersSimulator:
 
         return refilled
 
-    def _activate_bonus(
-        self, r, c
-    ) -> Tuple[Set[Tuple[int, int]], Set[Tuple[int, int]]]:
+    # ---------------------------------------------------------------------
+    # helper: bonus clears shield in one hit
+    # ---------------------------------------------------------------------
+    def _bonus_breaks_shield(self, r: int, c: int):
+        """Break background at (r,c) according to bonus rules."""
+        if self.background[r, c] == self.BG_SHIELD:
+            self.background[r, c] = self.BG_NONE  # bonus skips the stone phase
+            self.stones_cleared += 1  # counts as breaking a stone
+            return 5  # reward as if stone was broken
+        elif self.background[r, c] == self.BG_STONE:
+            self.background[r, c] = self.BG_NONE
+            self.stones_cleared += 1
+            return 5
+        return 0
+
+    # ---------------------------------------------------------------------
+    # helper: reshuffle when stuck (gems+bonuses only)
+    # ---------------------------------------------------------------------
+    def _shuffle_board(self):
+        """Shuffle movable tiles until at least one valid swap exists."""
+        movable = []
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if not self._is_valid_coord(r, c):
+                    continue
+                t = self.content[r, c]
+                if t != self.EMPTY and t != self.FRAGMENT:
+                    movable.append(t)
+
+        if not movable:  # pathological case
+            return False
+
+        tries = 20
+        while tries:
+            random.shuffle(movable)
+            idx = 0
+            for r in range(self.rows):
+                for c in range(self.cols):
+                    if not self._is_valid_coord(r, c):
+                        continue
+                    t = self.content[r, c]
+                    if t != self.EMPTY and t != self.FRAGMENT:
+                        self.content[r, c] = movable[idx]
+                        idx += 1
+
+            if self.get_valid_swaps():  # success
+                return True
+            tries -= 1
+
+        return False  # give up; unlikely, but step() will end the game
+
+    # ---------------------------------------------------------------------
+    # patched _activate_bonus
+    # ---------------------------------------------------------------------
+    def _activate_bonus(self, r, c):
         """
-        Activate bonus at (r,c) and return
-            • affected_coords        – tiles to clear/break (*excluding* the bonus itself)
-            • chained_bonuses_coords – other bonuses hit, to be activated next
-        Side effect: increments self.bonus2_trigger_count when bonus‑0/1 fires.
+        Activate the bonus at (r,c).
+        Returns: (affected_coords, chained_bonus_coords)
+        Increments self.bonus2_trigger_count internally for B0/B1.
         """
         bonus_type = self.content[r, c]
-        affected_coords: Set[Tuple[int, int]] = set()
+        affected, chained = set(), set()
 
-        def sweep(delta_r, delta_c):
-            rr, cc = r + delta_r, c + delta_c
-            while self._is_valid_coord(rr, cc):
-                if self.content[rr, cc] == self.FRAGMENT:  # stops at fragment
+        def add_row(rr):
+            for cc in range(self.cols):
+                if cc == c or not self._is_valid_coord(rr, cc):
+                    continue
+                if self.content[rr, cc] == self.FRAGMENT:
+                    break  # stop at fragment
+                affected.add((rr, cc))
+
+        def add_col(cc):
+            for rr in range(self.rows):
+                if rr == r or not self._is_valid_coord(rr, cc):
+                    continue
+                if self.content[rr, cc] == self.FRAGMENT:
                     break
-                affected_coords.add((rr, cc))
-                rr += delta_r
-                cc += delta_c
+                affected.add((rr, cc))
 
-        if bonus_type == self.BONUS_0:  # row clear
+        if bonus_type == self.BONUS_0:
             self.bonus2_trigger_count += 1
-            sweep(0, 1)
-            sweep(0, -1)
-        elif bonus_type == self.BONUS_1:  # plus clear
+            add_row(r)
+
+        elif bonus_type == self.BONUS_1:
             self.bonus2_trigger_count += 1
-            sweep(0, 1)
-            sweep(0, -1)
-            sweep(1, 0)
-            sweep(-1, 0)
-        elif bonus_type == self.BONUS_2:  # random 15‑20 clear
+            add_row(r)
+            add_col(c)
+
+        elif bonus_type == self.BONUS_2:
+            # pick 15‑20 random clearable tiles
             pool = [
                 (rr, cc)
                 for rr in range(self.rows)
@@ -478,138 +536,156 @@ class SevenWondersSimulator:
                 and self.content[rr, cc] not in (self.EMPTY, self.FRAGMENT)
                 and not (self.BONUS_0 <= self.content[rr, cc] <= self.BONUS_2)
             ]
-            affected_coords.update(
-                random.sample(pool, k=min(len(pool), random.randint(15, 20)))
-            )
+            random.shuffle(pool)
+            affected.update(pool[: random.randint(15, 20)])
 
-        # separate out bonuses that will chain
-        chained = {
-            xy
-            for xy in affected_coords
-            if self.BONUS_0 <= self.content[xy] <= self.BONUS_2
-        }
-        affected_coords -= chained
-        return affected_coords, chained
+        # chain‑react: pull out bonuses encountered
+        for rr, cc in list(affected):
+            if self.BONUS_0 <= self.content[rr, cc] <= self.BONUS_2:
+                chained.add((rr, cc))
+                affected.remove((rr, cc))
 
-    def _shuffle_board(self):
-        """Randomly shuffle all swappable tiles until the board has at least one valid move and no matches."""
-        movable = [
-            (r, c)
-            for r in range(self.rows)
-            for c in range(self.cols)
-            if self._is_valid_coord(r, c)
-            and self.content[r, c] not in (self.EMPTY, self.FRAGMENT)
-        ]
-        gems = [self.content[r, c] for r, c in movable]
-        random.shuffle(gems)
-        for (r, c), val in zip(movable, gems):
-            self.content[r, c] = val
-
-        # Make sure we didn't create instant matches
-        while self._find_matches(self.content) or not self.get_valid_swaps():
-            random.shuffle(gems)
-            for (r, c), val in zip(movable, gems):
-                self.content[r, c] = val
+        return affected, chained
 
     # ==========================================================================
     # ===                        CORE STEP FUNCTION                          ===
     # ==========================================================================
     def step(self, swap_action: Swap):
-        """Execute one player swap and resolve the full cascade. Returns (next_state, done)."""
+        """
+        Execute one player swap, resolve all bonus chains + cascades, then return:
+            (next_state, reward, done)
+        """
         (r1, c1), (r2, c2) = swap_action
 
-        # --- 1. quick legality check ---------------------------------------
+        # ---- 0. basic legality checks ------------------------------------
         if not (self._is_valid_coord(r1, c1) and self._is_valid_coord(r2, c2)):
-            return (
-                self._get_state_representation(),
-                True,
-            )  # end episode on invalid action
-        if self.content[r1, c1] in (self.EMPTY, self.FRAGMENT) or self.content[
-            r2, c2
-        ] in (self.EMPTY, self.FRAGMENT):
-            return self._get_state_representation(), True
+            self.display()
+            return self._get_state_representation(), -100, True
 
-        # --- 2. perform swap (content only) --------------------------------
+        if any(
+            self.content[r, c] in (self.FRAGMENT, self.EMPTY)
+            for r, c in ((r1, c1), (r2, c2))
+        ):
+            self.display()
+            return self._get_state_representation(), -100, True
+
+        # ---- 1. perform swap (background never moves) --------------------
         self.content[r1, c1], self.content[r2, c2] = (
             self.content[r2, c2],
             self.content[r1, c1],
         )
 
-        # --- 3. cascade loop ----------------------------------------------
-        bonuses_next: Set[Tuple[int, int]] = set()
+        step_reward = -1  # tiny move cost
+        bonuses_queue = set()  # bonuses that will explode immediately
+
+        # if the swap moved a bonus, queue it
+        for pos in ((r1, c1), (r2, c2)):
+            if self.BONUS_0 <= self.content[pos] <= self.BONUS_2:
+                bonuses_queue.add(pos)
+
+        # ---- 2. CASCADE LOOP --------------------------------------------
         while True:
-            cleared, break_bg = set(), set()
+            cleared, to_break = set(), set()
 
-            # (A) chain bonuses waiting from previous loop ------------------
-            if bonuses_next:
-                todo = bonuses_next
-                bonuses_next = set()
-                for br, bc in todo:
-                    if not self._is_valid_coord(br, bc) or self.content[
-                        br, bc
-                    ] not in range(self.BONUS_0, self.BONUS_2 + 1):
-                        continue
-                    local_clear, chained = self._activate_bonus(br, bc)
-                    cleared.add((br, bc))
-                    break_bg.add((br, bc))
-                    cleared.update(local_clear)
-                    break_bg.update(local_clear)
-                    bonuses_next.update(chained)
+            # A. process bonuses until no new ones appear ------------------
+            while bonuses_queue:
+                br, bc = bonuses_queue.pop()
+                affected, chained = self._activate_bonus(br, bc)
 
-            # (B) normal gem matches ---------------------------------------
+                cleared.add((br, bc))
+                to_break.add((br, bc))
+
+                for ar, ac in affected:
+                    if self.content[ar, ac] != self.FRAGMENT:
+                        cleared.add((ar, ac))
+                        to_break.add((ar, ac))
+
+                # chain all B0/B1, but never B2
+                bonuses_queue.update(chained)
+
+                step_reward += 5  # reward per bonus trigger
+
+            # B. match regular gems on the current static board ------------
             matches = self._find_matches(self.content)
             if matches:
-                details = self._get_match_details(
-                    matches,
-                    swapped_loc=(
-                        (r1, c1)
-                        if (r1, c1) in matches
-                        else (r2, c2) if (r2, c2) in matches else None
-                    ),
+                swapped_loc = (
+                    (r1, c1)
+                    if (r1, c1) in matches
+                    else (r2, c2) if (r2, c2) in matches else None
                 )
-                # spawn bonus if 4/5‑match
-                spawn_loc = details["bonus_loc"]
-                if details["5_matches"] and spawn_loc in details["5_matches"]:
-                    self.content[spawn_loc] = self.BONUS_1
-                    bonuses_next.add((spawn_loc))  # will activate after gravity
-                    matches.remove(spawn_loc)
-                elif details["4_matches"] and spawn_loc in details["4_matches"]:
-                    self.content[spawn_loc] = self.BONUS_0
-                    bonuses_next.add((spawn_loc))
-                    matches.remove(spawn_loc)
+                md = self._get_match_details(matches, swapped_loc)
 
+                bonus_loc = md["bonus_loc"] or (r1, c1)
                 cleared.update(matches)
-                break_bg.update(matches)
+                to_break.update(matches)
+                step_reward += 2 * len(matches)
 
-            # (C) nothing else to do? --------------------------------------
-            if not cleared and not bonuses_next:
+                # spawn new bonus if 4‑ or 5‑match
+                if bonus_loc in md["5_matches"]:
+                    self.content[bonus_loc] = self.BONUS_1
+                    cleared.discard(bonus_loc)
+                    to_break.discard(bonus_loc)
+                elif bonus_loc in md["4_matches"]:
+                    self.content[bonus_loc] = self.BONUS_0
+                    cleared.discard(bonus_loc)
+                    to_break.discard(bonus_loc)
+
+            # stop cascade when nothing happened this round
+            if not cleared and not matches:
                 break
 
-            # (D) clear tiles & backgrounds --------------------------------
-            for r, c in cleared:
-                if (r, c) not in bonuses_next:  # don't clear freshly‑placed bonus
-                    self.content[r, c] = self.EMPTY
-            for r, c in break_bg:
-                if self.background[r, c] == self.BG_SHIELD:
-                    self.background[r, c] = self.BG_STONE
-                elif self.background[r, c] == self.BG_STONE:
-                    self.background[r, c] = self.BG_NONE
-                    self.stones_cleared += 1
+            # C. clear contents -------------------------------------------
+            bonus_clears = cleared.copy()
+            for cr, cc in cleared:
+                self.content[cr, cc] = self.EMPTY
 
-            # (E) gravity + refill (which may drop fragment / bonus‑2) -----
-            moved = True
-            while moved:
-                moved = self._apply_gravity()
+            # D. break background tiles -----------------------------------
+            for br, bc in to_break:
+                if self.content[br, bc] != self.EMPTY:
+                    continue  # something replaced it (e.g., new bonus)
+
+                if (br, bc) in bonus_clears:
+                    step_reward += self._bonus_breaks_shield(br, bc)  # bonus smash
+                else:  # ordinary gem match
+                    if self.background[br, bc] == self.BG_SHIELD:
+                        self.background[br, bc] = self.BG_STONE
+                        step_reward += 3
+                    elif self.background[br, bc] == self.BG_STONE:
+                        self.background[br, bc] = self.BG_NONE
+                        self.stones_cleared += 1
+                        step_reward += 5
+
+            # E. gravity + refill (handles bonus‑2 & fragment drops) -------
+            while self._apply_gravity():
+                pass
             self._refill_board()
 
-        # --- 4. victory / no‑move shuffle ---------------------------------
-        if self.fragments_on_board == 0 and np.all(self.background == self.BG_NONE):
-            done = True
-        else:
-            if not self.get_valid_swaps():
-                self._shuffle_board()
+            # any bonus_2 spawned by refill should explode next loop
+            for r in range(self.rows):
+                for c in range(self.cols):
+                    if self.content[r, c] == self.BONUS_2 and self._is_valid_coord(
+                        r, c
+                    ):
+                        bonuses_queue.add((r, c))
 
-        return self._get_state_representation(), False
+        # ---- 3. SHUFFLE IF STUCK ----------------------------------------
+        if not self.get_valid_swaps():
+            if not self._shuffle_board():  # shuffle failed to produce a move
+                self.display()
+                return self._get_state_representation(), step_reward - 500, True
+
+        # ---- 4. WIN CHECK -----------------------------------------------
+        if (
+            self.fragments_on_board == 0
+            and np.all(self.background != self.BG_SHIELD)
+            and np.all(self.background != self.BG_STONE)
+        ):
+            self.display()
+            return self._get_state_representation(), step_reward + 1000, True
+
+        # ---- 5. continue playing ----------------------------------------
+        self.display()
+        return self._get_state_representation(), step_reward, False
 
     # --- Optional: Helper for Display ---
     def display(self):
