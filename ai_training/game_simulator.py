@@ -8,7 +8,8 @@ from collections import defaultdict, deque
 import config
 
 # Type hint for a swap action
-Swap = Tuple[Tuple[int, int], Tuple[int, int]]
+Coord = Tuple[int, int]
+Swap = Tuple[Coord, Coord]
 
 LEVEL_1 = {
     "mask": [
@@ -52,6 +53,7 @@ class SevenWondersSimulator:
         self.FRAGMENT = self.map_fg["fragment"]
         self.GEM_START_IDX = self.map_fg["gem_0"]
         self.GEM_END_IDX = self.map_fg["gem_7"]
+        self.GEMS = [self.map_fg[f"gem_{i}"] for i in range(8)]
         self.BONUS_0 = self.map_fg["bonus_0"]
         self.BONUS_1 = self.map_fg["bonus_1"]
         self.BONUS_2 = self.map_fg["bonus_2"]
@@ -104,7 +106,7 @@ class SevenWondersSimulator:
                     raise ValueError(f"Invalid level character: {ch}")
 
         # Ensure no initial matches
-        while self._find_matches(self.content):
+        while self._find_matches():
             for r in range(self.rows):
                 for c in range(self.cols):
                     if self.mask[r, c]:
@@ -116,11 +118,11 @@ class SevenWondersSimulator:
             (self.background == self.BG_STONE) | (self.background == self.BG_SHIELD)
         )
 
-    def _is_valid_coord(self, r, c):
+    def _is_valid_coord(self, r, c) -> bool:
         """Checks if coordinates are within the board bounds."""
         return 0 <= r < self.rows and 0 <= c < self.cols and self.mask[r, c]
 
-    def _get_state_representation(self):
+    def _get_state_representation(self) -> np.ndarray:
         """
         Converts the current board state (content, background) into a numerical
         representation suitable for the DQN agent (e.g., a multi-channel NumPy array).
@@ -135,15 +137,15 @@ class SevenWondersSimulator:
         # Shape: (2, self.rows, self.cols) - Matches QNetwork input_channels=2 expectation
         return state
 
-    def _find_matches(self, board_content) -> Set[Tuple[int, int]]:
+    def _find_matches(self) -> Set[Tuple[int, int]]:
         """
         Finds all coordinates of gems involved in matches (3 or more).
         Does NOT match bonuses or fragments.
         Returns a set of (row, col) tuples.
         """
         matches = set()
-        gem_mask = (board_content >= self.GEM_START_IDX) & (
-            board_content <= self.GEM_END_IDX
+        gem_mask = (self.content >= self.GEM_START_IDX) & (
+            self.content <= self.GEM_END_IDX
         )
 
         # First pass: find all horizontal and vertical matches
@@ -152,19 +154,20 @@ class SevenWondersSimulator:
         
         for r in range(self.rows):
             for c in range(self.cols):
-                if not gem_mask[r, c]:
-                    continue  # Only match gems
+                if not self._is_valid_coord(r, c) or self.content[r, c] not in self.GEMS:
+                    continue 
 
-                gem_type = board_content[r, c]
+                gem_type = self.content[r, c]
 
                 # Check horizontal
                 h_len = 0
                 while (
-                    c + h_len < self.cols
-                    and gem_mask[r, c + h_len]
-                    and board_content[r, c + h_len] == gem_type
+                    self._is_valid_coord(r, c + h_len)
+                    and self.content[r, c + h_len] == gem_type
                 ):
                     h_len += 1
+
+                # Add horizontal matches
                 if h_len >= 3:
                     for i in range(h_len):
                         h_matches.add((r, c + i))
@@ -172,125 +175,117 @@ class SevenWondersSimulator:
                 # Check vertical
                 v_len = 0
                 while (
-                    r + v_len < self.rows
-                    and gem_mask[r + v_len, c]
-                    and board_content[r + v_len, c] == gem_type
+                    self._is_valid_coord(r + v_len, c)
+                    and self.content[r + v_len, c] == gem_type
                 ):
                     v_len += 1
+
+                # Add vertical matches
                 if v_len >= 3:
                     for i in range(v_len):
                         v_matches.add((r + i, c))
 
-        # Second pass: merge overlapping matches and handle L/T shapes
-        all_matches = h_matches | v_matches
-        for r in range(self.rows):
-            for c in range(self.cols):
-                if not gem_mask[r, c]:
-                    continue
-                
-                # Check if this cell is part of both horizontal and vertical matches
-                if (r, c) in h_matches and (r, c) in v_matches:
-                    # This is an intersection point of an L/T shape
-                    # Add all cells from both matches
-                    gem_type = board_content[r, c]
-                    
-                    # Add horizontal line
-                    h_start = c
-                    while h_start > 0 and gem_mask[r, h_start-1] and board_content[r, h_start-1] == gem_type:
-                        h_start -= 1
-                    h_end = c
-                    while h_end < self.cols-1 and gem_mask[r, h_end+1] and board_content[r, h_end+1] == gem_type:
-                        h_end += 1
-                    for i in range(h_start, h_end + 1):
-                        matches.add((r, i))
-                    
-                    # Add vertical line
-                    v_start = r
-                    while v_start > 0 and gem_mask[v_start-1, c] and board_content[v_start-1, c] == gem_type:
-                        v_start -= 1
-                    v_end = r
-                    while v_end < self.rows-1 and gem_mask[v_end+1, c] and board_content[v_end+1, c] == gem_type:
-                        v_end += 1
-                    for i in range(v_start, v_end + 1):
-                        matches.add((i, c))
-                else:
-                    # Just add the cell if it's part of any match
-                    if (r, c) in all_matches:
-                        matches.add((r, c))
+        # Combine horizontal and vertical matches
+        matches.update(h_matches)
+        matches.update(v_matches)
 
         return matches
 
-    def _get_match_details(
-        self,
-        matches: Set[Tuple[int, int]],
-        swapped_loc: Optional[Tuple[int, int]] = None,
-    ) -> dict:
+    def _get_match_details(self, matches: Set[Tuple[int, int]], swap_action=None):
         """
-        Classifies every connected match cluster into:
-            • 5_matches  → size ≥5 (straight or L/T)
-            • 4_matches  → size ==4 (straight)
-            • other_matches → size ==3
-        Also returns a sensible bonus placement coordinate.
-        """
-        details = {"4_matches": set(), "5_matches": set(), "other_matches": set()}
-        bonus_loc = None
-
-        for cluster in self._clusters(matches):
-            size = len(cluster)
+        Analyzes matches to identify distinct match clusters, calculate rewards,
+        and determine bonus placements for 4 and 5+ matches.
+        
+        Args:
+            matches: Set of (row, col) tuples of matching gem coordinates
+            swap_action: The action that caused this match, if any
             
-            # Check if this is an L/T shape by looking for cells with both horizontal and vertical neighbors
-            is_l_shape = False
-            for r, c in cluster:
-                h_neighbors = sum(1 for dc in (-1, 1) if (r, c+dc) in cluster)
-                v_neighbors = sum(1 for dr in (-1, 1) if (r+dr, c) in cluster)
-                if h_neighbors > 0 and v_neighbors > 0:
-                    is_l_shape = True
-                    break
-
-            if size >= 5 or (size >= 4 and is_l_shape):
-                details["5_matches"].update(cluster)
-            elif size == 4:
-                details["4_matches"].update(cluster)
-            else:
-                details["other_matches"].update(cluster)
-
-            # Choose a good bonus location for this cluster
-            if bonus_loc is None:  # take the first eligible cluster
-                if swapped_loc and swapped_loc in cluster:
-                    bonus_loc = swapped_loc
-                else:
-                    # For L/T shapes, prefer the intersection point
-                    if is_l_shape:
-                        for r, c in cluster:
-                            h_neighbors = sum(1 for dc in (-1, 1) if (r, c+dc) in cluster)
-                            v_neighbors = sum(1 for dr in (-1, 1) if (r+dr, c) in cluster)
-                            if h_neighbors > 0 and v_neighbors > 0:
-                                bonus_loc = (r, c)
-                                break
-                    if bonus_loc is None:
-                        # Otherwise take the first cell in the cluster
-                        bonus_loc = next(iter(cluster))
-
-        details["bonus_loc"] = bonus_loc
-        return details
-
-    def _clusters(self, coords):
-        """Split a set of coordinates into 4‑connected clusters."""
-        coords = set(coords)
+        Returns:
+            Dictionary with match details:
+            - 'clusters': List of match clusters (each cluster is a set of coordinates)
+            - 'bonus_placements': List of (row, col, bonus_type) tuples for bonus placement
+            - 'total_reward': Total reward points for all clusters
+        """
+            
+        # Find distinct match clusters using BFS
         clusters = []
-        while coords:
-            q = deque([coords.pop()])
+        remaining = set(matches)
+        
+        while remaining:
+            # Start a new cluster with the first remaining match
+            current = next(iter(remaining))
             cluster = set()
-            while q:
-                r, c = q.popleft()
+            queue = [current]
+            
+            # Add all connected matches to this cluster
+            while queue:
+                r, c = queue.pop(0)
+                if (r, c) not in remaining:
+                    continue
+                    
                 cluster.add((r, c))
-                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                    neigh = (r + dr, c + dc)
-                    if neigh in coords:
-                        coords.remove(neigh)
-                        q.append(neigh)
+                remaining.remove((r, c))
+                
+                # Add adjacent matches to the queue
+                for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                    adj = (r + dr, c + dc)
+                    if adj in remaining:
+                        queue.append(adj)
+            
             clusters.append(cluster)
-        return clusters
+        
+        # Calculate bonus placements and rewards
+        bonus_placements = []
+        total_reward = 0
+        
+        for cluster in clusters:
+            gem_type = self.content[next(iter(cluster))]
+            
+            # Calculate reward based on cluster size
+            # Base reward: 2 points per gem as in the step_reward logic
+            cluster_size = len(cluster)
+            cluster_reward = 2 * cluster_size
+            
+            # Bonus rewards for larger matches
+            if cluster_size >= 6:
+                # Extra points for very large clusters
+                cluster_reward += 10
+            elif cluster_size >= 5:
+                cluster_reward += 5
+            elif cluster_size == 4:
+                cluster_reward += 2
+                
+            total_reward += cluster_reward
+            
+            # Determine bonus placement for 4+ matches
+            if cluster_size >= 4:
+                # For 4-match, create BONUS_0 (row clear)
+                # For 5+ match, create BONUS_1 (row+col clear)
+                bonus_type = self.BONUS_0 if cluster_size == 4 else self.BONUS_1
+                
+                # Determine the best position for the bonus
+                # If this was from a swap, prefer the swapped position
+                if swap_action and (swap_action[0], swap_action[1]) in cluster:
+                    bonus_pos = (swap_action[0], swap_action[1])
+                else:
+                    # Otherwise choose center-most position in the cluster
+                    # Calculate average position
+                    avg_r = sum(r for r, _ in cluster) / len(cluster)
+                    avg_c = sum(c for _, c in cluster) / len(cluster)
+                    
+                    # Find closest position to average
+                    bonus_pos = min(cluster, key=lambda pos: 
+                                   (pos[0] - avg_r) ** 2 + (pos[1] - avg_c) ** 2)
+                
+                bonus_placements.append((*bonus_pos, bonus_type))
+        
+        return {
+            'clusters': clusters,
+            'bonus_placements': bonus_placements,
+            'total_reward': total_reward
+        }
+
+
 
     def get_valid_swaps(self) -> List[Swap]:
         """
@@ -334,7 +329,7 @@ class SevenWondersSimulator:
                     else:
                         # need to test for a resulting match
                         self.content[r, c], self.content[r, c + 1] = t2, t1
-                        if self._find_matches(self.content):
+                        if self._find_matches():
                             valid_swaps.append(((r, c), (r, c + 1)))
                         # restore board
                         self.content[r, c], self.content[r, c + 1] = t1, t2
@@ -347,7 +342,7 @@ class SevenWondersSimulator:
                         valid_swaps.append(((r, c), (r + 1, c)))
                     else:
                         self.content[r, c], self.content[r + 1, c] = t2, t1
-                        if self._find_matches(self.content):
+                        if self._find_matches():
                             valid_swaps.append(((r, c), (r + 1, c)))
                         self.content[r, c], self.content[r + 1, c] = t1, t2
 
@@ -355,131 +350,75 @@ class SevenWondersSimulator:
 
     def _apply_gravity(self) -> bool:
         """
-        Move every tile straight downward until it lands on:
-            • the bottom row, or
-            • the first non‑hole cell whose mask == False below it,
-            • or another occupied tile.
-
-        Holes (`mask == False`) are treated as solid walls:
-        content never occupies them; gravity skips over them.
+        Applies gravity to the board, causing all contents to fall down into empty spaces.
+        Background elements (stone, shield) remain in place.
+        
+        Returns:
+            bool: True if any piece moved, False otherwise
         """
         moved = False
-
-        # Copy so we can edit in‑place without breaking look‑ahead
-        new_content = np.copy(self.content)
-        new_background = np.copy(self.background)
-
+        
+        # Scan from bottom to top (excluding bottom row)
         for c in range(self.cols):
-            # Find the lowest *playable* cell in this column
-            write_idx = self.rows - 1
-            while write_idx >= 0 and not self.mask[write_idx, c]:
-                write_idx -= 1  # skip bottom holes entirely
-
-            # Scan upward
-            r = write_idx
-            while r >= 0:
-                if not self.mask[r, c]:
-                    # Hole: keep write_idx where it is but step past the hole
-                    r -= 1
+            for r in range(self.rows - 2, -1, -1):  # Start from second-to-last row, go up
+                # Skip if this position is outside the mask or empty
+                if not self.mask[r, c] or self.content[r, c] == self.EMPTY:
                     continue
-
-                if new_content[r, c] != self.EMPTY:
-                    if r != write_idx:
-                        # Move the tile + its background
-                        new_content[write_idx, c] = new_content[r, c]
-                        new_background[write_idx, c] = new_background[r, c]
-
-                        new_content[r, c] = self.EMPTY
-                        new_background[r, c] = self.BG_NONE
-                        moved = True
-                    write_idx -= 1  # next landing spot
-                    # Skip any intervening holes
-                    while write_idx >= 0 and not self.mask[write_idx, c]:
-                        write_idx -= 1
-                r -= 1
-
-            # Clear remaining playable cells above write_idx
-            while write_idx >= 0:
-                if self.mask[write_idx, c] and new_content[write_idx, c] != self.EMPTY:
-                    new_content[write_idx, c] = self.EMPTY
-                    new_background[write_idx, c] = self.BG_NONE
+                
+                # Find the furthest down this piece can fall
+                current_r = r
+                next_r = r + 1
+                
+                # Keep moving down as long as the next position is valid and empty
+                while (self._is_valid_coord(next_r, c) and 
+                       self.content[next_r, c] == self.EMPTY):
+                    current_r = next_r
+                    next_r = current_r + 1
+                
+                # If we found a position to move to
+                if current_r != r:
+                    # Move the content to the new position
+                    self.content[current_r, c] = self.content[r, c]
+                    self.content[r, c] = self.EMPTY
                     moved = True
-                write_idx -= 1
-                while write_idx >= 0 and not self.mask[write_idx, c]:
-                    write_idx -= 1
-
-        self.content = new_content
-        self.background = new_background
+        
         return moved
 
     def _refill_board(self) -> bool:
-        """Refill top of each column, then maybe drop Fragment and/or Bonus‑2."""
+        """
+        Refills empty tiles with random gems and may spawn special tiles (bonus_2, fragment) in top row.
+        Returns True if any tiles were refilled.
+        """
         refilled = False
-
-        # ---- 1. Normal gem refill (respect mask) ---------------------------
-        for c in range(self.cols):
-            # first playable row in this column
-            top_playable = next(
-                (r for r in range(self.rows) if self._is_valid_coord(r, c)), None
-            )
-            if top_playable is None:
-                continue  # column is entirely holes
-
-            r = top_playable
-            while (
-                r < self.rows
-                and self._is_valid_coord(r, c)
-                and self.content[r, c] == self.EMPTY
-            ):
-                self.content[r, c] = random.randint(
-                    self.GEM_START_IDX, self.GEM_END_IDX
-                )
-                self.background[r, c] = self.BG_NONE
-                refilled = True
-                r += 1
-
-        # ---- 2. Bonus‑2 drop (every 4 bonus0/1 activations) ---------------
-        if self.bonus2_trigger_count >= 4:
-            self.bonus2_trigger_count %= 4  # reset counter but keep overflow
-            candidate_cols = []
+        refilled_top_row = []
+        
+        # First, fill all empty tiles with random gems
+        for r in range(self.rows):
             for c in range(self.cols):
-                top_row = next(
-                    (r for r in range(self.rows) if self._is_valid_coord(r, c)), None
-                )
-                if top_row is None:
-                    continue
-                if self.content[top_row, c] == self.EMPTY:
-                    candidate_cols.append((top_row, c))
-            if candidate_cols:
-                r_b2, c_b2 = random.choice(candidate_cols)
-                self.content[r_b2, c_b2] = self.BONUS_2
-                #  Bonus‑2 sits on whatever background is there (stone or none)
-                refilled = True
-
-        # ---- 3. Fragment drop (>50 % stones cleared) ----------------------
-        stones_ratio = (
-            (self.stones_cleared / self.initial_stones) if self.initial_stones else 0
-        )
-        if stones_ratio > 0.5 and self.fragments_on_board < self.max_fragments:
-            candidate_cols = []
-            for c in range(self.cols):
-                top_row = next(
-                    (r for r in range(self.rows) if self._is_valid_coord(r, c)), None
-                )
-                if top_row is None:
-                    continue
-                if (
-                    self.content[top_row, c] == self.EMPTY
-                    and self.background[top_row, c] == self.BG_NONE
-                ):
-                    candidate_cols.append((top_row, c))
-            if candidate_cols:
-                r_f, c_f = random.choice(candidate_cols)
-                self.content[r_f, c_f] = self.FRAGMENT
-                # fragment always sits on BG_NONE by rule
-                self.fragments_on_board += 1
-                refilled = True
-
+                if self._is_valid_coord(r, c) and self.content[r, c] == self.EMPTY:
+                    self.content[r, c] = random.randint(self.GEM_START_IDX, self.GEM_END_IDX)
+                    refilled = True
+                    # Track refilled positions in the top row
+                    if r == 0:
+                        refilled_top_row.append((r, c))
+        
+            
+        # Check if we should spawn bonus_2 (every 4 bonus2_trigger_count)
+        if self.bonus2_trigger_count > 0 and self.bonus2_trigger_count % 4 == 0 and refilled:
+            pos_idx = random.randrange(len(refilled_top_row))
+            pos = refilled_top_row.pop(pos_idx)
+            self.content[pos[0], pos[1]] = self.BONUS_2
+            refilled = True
+        
+        # Check if we should spawn fragment (when stones_cleared > 50% of initial_stones)
+        if (self.stones_cleared > self.initial_stones * 0.5 and 
+            self.fragments_on_board < self.max_fragments and refilled):
+            pos_idx = random.randrange(len(refilled_top_row))
+            pos = refilled_top_row[pos_idx]
+            self.content[pos[0], pos[1]] = self.FRAGMENT
+            self.fragments_on_board += 1
+            refilled = True
+            
         return refilled
 
 
@@ -637,7 +576,7 @@ class SevenWondersSimulator:
         # ---- 2. CASCADE LOOP --------------------------------------------
         while True:
             # Cleared contents (gems, bonuses); To break background tiles
-            cleared, to_break = set(), set()
+            cleared, to_break, bonus_breaks = set(), set(), set()
 
             # A. process bonuses until no new ones appear ------------------
             while bonuses_queue:
@@ -647,40 +586,32 @@ class SevenWondersSimulator:
                 for ar, ac in affected:
                     if self.content[ar, ac] != self.FRAGMENT:
                         cleared.add((ar, ac))
-                        to_break.add((ar, ac))
+                        bonus_breaks.add((ar, ac))
 
                 # chain all B0/B1, but never B2
                 bonuses_queue.update(chained)
 
                 step_reward += 5  # reward per bonus trigger
 
-            # This tiles breaks comletely (from shileld to empty)
-            bonus_breaks = to_break.copy()
+          
 
             # B. match regular gems on the current static board ------------
-            matches = self._find_matches(self.content)
+            matches = self._find_matches()
             if matches:
-                swapped_loc = (
-                    (r1, c1)
-                    if (r1, c1) in matches
-                    else (r2, c2) if (r2, c2) in matches else None
-                )
-                md = self._get_match_details(matches, swapped_loc)
-
-                bonus_loc = md["bonus_loc"] or (r1, c1)
                 cleared.update(matches)
                 to_break.update(matches)
-                step_reward += 2 * len(matches)
-
-                # spawn new bonus if 4‑ or 5‑match
-                if bonus_loc in md["5_matches"]:
-                    self.content[bonus_loc] = self.BONUS_1
-                    cleared.discard(bonus_loc)
-                    to_break.discard(bonus_loc)
-                elif bonus_loc in md["4_matches"]:
-                    self.content[bonus_loc] = self.BONUS_0
-                    cleared.discard(bonus_loc)
-                    to_break.discard(bonus_loc)
+                
+                # Get match details to determine bonus placement and additional rewards
+                md = self._get_match_details(matches, swap_action)
+                step_reward += md['total_reward']
+                
+                # Place bonuses at the appropriate positions
+                for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
+                    # The position will be cleared, then we'll place the bonus there
+                    self.content[bonus_r, bonus_c] = bonus_type
+                    # Remove from the cleared set so the bonus doesn't get removed
+                    if (bonus_r, bonus_c) in cleared:
+                        cleared.remove((bonus_r, bonus_c))
 
             # stop cascade when nothing happened this round
             if not cleared and not matches:
@@ -691,41 +622,28 @@ class SevenWondersSimulator:
                 self.content[cr, cc] = self.EMPTY
 
             # D. break background tiles -----------------------------------
-            for br, bc in to_break:
-                if self.content[br, bc] != self.EMPTY:
-                    continue  # something replaced it (e.g., new bonus)
+            for br, bc in bonus_breaks:
+                self.background[br, bc] = self.BG_NONE
+                self.stones_cleared += 1
+                step_reward += 5
 
-                if (br, bc) in bonus_breaks:
+            for br, bc in to_break:
+                if self.background[br, bc] == self.BG_SHIELD:
+                    self.background[br, bc] = self.BG_STONE
+                    step_reward += 3
+                elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
                     step_reward += 5
-                else:  # ordinary gem match
-                    if self.background[br, bc] == self.BG_SHIELD:
-                        self.background[br, bc] = self.BG_STONE
-                        step_reward += 3
-                    elif self.background[br, bc] == self.BG_STONE:
-                        self.background[br, bc] = self.BG_NONE
-                        self.stones_cleared += 1
-                        step_reward += 5
 
             # E. gravity + refill (handles bonus‑2 & fragment drops) -------
-            while self._apply_gravity():
-                pass
+            self._apply_gravity()
             self._refill_board()
-
-            # any bonus_2 spawned by refill should explode next loop
-            for r in range(self.rows):
-                for c in range(self.cols):
-                    if self.content[r, c] == self.BONUS_2 and self._is_valid_coord(
-                        r, c
-                    ):
-                        bonuses_queue.add((r, c))
 
         # ---- 3. SHUFFLE IF STUCK ----------------------------------------
         if not self.get_valid_swaps():
             if not self._shuffle_board():  # shuffle failed to produce a move
-                self.display()
-                return self._get_state_representation(), step_reward - 500, True
+                return self._get_state_representation(), step_reward, True
 
         # ---- 4. WIN CHECK -----------------------------------------------
         if (
@@ -889,7 +807,7 @@ if __name__ == "__main__":
                     (r1, c1), (r2, c2) = swap
                     t1, t2 = sim.content[r1, c1], sim.content[r2, c2]
                     sim.content[r1, c1], sim.content[r2, c2] = t2, t1  # Test swap
-                    matches = sim._find_matches(sim.content)
+                    matches = sim._find_matches()
                     if matches:
                         details = sim._get_match_details(
                             matches, (r1, c1)
