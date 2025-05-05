@@ -1,10 +1,13 @@
 # --- game_simulator.py ---
 import numpy as np
 import random
-from typing import List, Tuple, Set, Optional  # For type hinting
-from collections import defaultdict, deque
+from typing import List, Tuple, Set
+from collections import deque
 
-# Assuming config.py is in the same directory or accessible
+import sys
+import os
+# Add parent directory to path to allow importing config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # Type hint for a swap action
@@ -79,7 +82,7 @@ class SevenWondersSimulator:
         # --- Board Initialization ---
         self._init_from_level(self.level)
 
-        return self._get_state_representation()
+        return self.get_state_representation()
 
     def _init_from_level(self, level_dict):
         self.mask = np.ones((self.rows, self.cols), dtype=bool)
@@ -124,7 +127,7 @@ class SevenWondersSimulator:
         """Checks if coordinates are within the board bounds."""
         return 0 <= r < self.rows and 0 <= c < self.cols and self.mask[r, c]
 
-    def _get_state_representation(self) -> np.ndarray:
+    def get_state_representation(self) -> np.ndarray:
         """
         Converts the current board state (content, background) into a numerical
         representation suitable for the DQN agent (e.g., a multi-channel NumPy array).
@@ -515,7 +518,7 @@ class SevenWondersSimulator:
             # Add tiles to the right of the bonus
             for cc in range(c + 1, self.cols):
                 if not self._is_valid_coord(rr, cc):
-                    continue
+                    break
                 if self.content[rr, cc] == self.FRAGMENT:
                     break  # stop at fragment
                 affected.add((rr, cc))
@@ -591,14 +594,14 @@ class SevenWondersSimulator:
         # ---- 0. basic legality checks ------------------------------------
         if not (self._is_valid_coord(r1, c1) and self._is_valid_coord(r2, c2)):
             self.display()
-            return self._get_state_representation(), -100, True
+            return self.get_state_representation(), -100, True
 
         if any(
             self.content[r, c] in (self.FRAGMENT, self.EMPTY)
             for r, c in ((r1, c1), (r2, c2))
         ):
             self.display()
-            return self._get_state_representation(), -100, True
+            return self.get_state_representation(), -100, True
 
         # ---- 1. perform swap (background never moves) --------------------
         self.content[r1, c1], self.content[r2, c2] = (
@@ -619,10 +622,14 @@ class SevenWondersSimulator:
         while True:
             # Cleared contents (gems, bonuses); To break background tiles
             cleared, to_break, bonus_breaks = set(), set(), set()
-
+            processed_bonuses = set()          # NEW: bonuses that already exploded
             # A. process bonuses until no new ones appear ------------------
             while bonuses_queue:
                 br, bc = bonuses_queue.pop()
+                if (br, bc) in processed_bonuses:
+                    continue
+                processed_bonuses.add((br, bc))
+
                 affected, chained = self._activate_bonus(br, bc)
                 print(f"Activated bonus at {br, bc}")
 
@@ -631,8 +638,8 @@ class SevenWondersSimulator:
                         cleared.add((ar, ac))
                         bonus_breaks.add((ar, ac))
 
-                # chain all B0/B1, but never B2
-                bonuses_queue.update(chained)
+                # only queue bonuses that haven't fired yet
+                bonuses_queue.update(chained - processed_bonuses)   
 
                 step_reward += 5  # reward per bonus trigger
 
@@ -692,7 +699,7 @@ class SevenWondersSimulator:
         if not self.get_valid_swaps():
             print(f"No valid swaps, shuffling board")
             if not self._shuffle_board():  # shuffle failed to produce a move
-                return self._get_state_representation(), step_reward, True
+                return self.get_state_representation(), step_reward, True
 
         # ---- 4. WIN CHECK -----------------------------------------------
         if (
@@ -702,12 +709,23 @@ class SevenWondersSimulator:
         ):
             print(f"Win check passed")
             self.display()
-            return self._get_state_representation(), step_reward + 1000, True
+            return self.get_state_representation(), step_reward + 1000, True
 
         # ---- 5. continue playing ----------------------------------------
         self.score += step_reward  # Add the step reward to the total score
         self.display()
-        return self._get_state_representation(), step_reward, False
+        return self.get_state_representation(), step_reward, False
+    
+    def get_global_features(self) -> np.ndarray:
+        """3 floats in [0,1] – tweak as you like."""
+        stones = self.stones_cleared / max(1, self.initial_stones)
+        shields = np.sum(self.background == self.BG_SHIELD) / (self.rows * self.cols)
+        fragments = self.fragments_on_board / self.max_fragments
+        return np.array([stones, shields, fragments], dtype=np.float32)
+
+    # convenience – one call returns everything the agent stores
+    def get_state_tuple(self):
+        return (self.get_state_representation(), self.get_global_features())    
 
     # --- Optional: Helper for Display ---
     def display(self):

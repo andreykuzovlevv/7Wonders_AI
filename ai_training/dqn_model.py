@@ -1,9 +1,7 @@
 # --- File: dqn_model.py ---
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import config
+import torch, torch.nn as nn, torch.nn.functional as F, config
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class QNetwork(nn.Module):
     def __init__(

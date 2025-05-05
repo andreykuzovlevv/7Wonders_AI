@@ -1,6 +1,8 @@
 # config.py
 # ───── CONFIGURATION ─────
 
+import torch
+
 GRID_ROWS = 10
 GRID_COLS = 10
 
@@ -22,3 +24,16 @@ BACKGROUND_CLASSES = ["none", "stone", "shield"]  # 0-2
 
 MAP_FG = {c: i for i, c in enumerate(CONTENT_CLASSES)}
 MAP_BG = {c: i for i, c in enumerate(BACKGROUND_CLASSES)}
+
+# DQN Hyperparameters
+SEED = 42             # Random seed for reproducibility
+LR = 5e-4             # Learning rate
+BUFFER_SIZE = int(1e5) # Replay buffer size
+BATCH_SIZE = 64        # Minibatch size
+GAMMA = 0.99           # Discount factor
+TAU = 1e-3             # For soft update of target parameters
+UPDATE_EVERY = 4       # How often to update the network
+NUM_GLOBAL_FEATURES = 3 # e.g., stone_norm, shield_norm, fragment_flag
+ACTION_DIM = 4         # r1, c1, r2, c2
+
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
