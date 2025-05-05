@@ -40,6 +40,7 @@ class SevenWondersSimulator:
         self.stones_cleared = 0
         self.fragments_on_board = 0
         self.max_fragments = 5  # Example limit
+        self.fragment_spawned = False 
 
         # Map string names to integers using config
         self.map_fg = config.MAP_FG  # {'empty':0, 'gem_0':1, …, 'bonus_2':12}
@@ -73,6 +74,7 @@ class SevenWondersSimulator:
         self.stones_cleared = 0
         self.fragments_on_board = 0
         self.initial_stones = 0
+        self.fragment_spawned = False
 
         # --- Board Initialization ---
         self._init_from_level(self.level)
@@ -350,83 +352,141 @@ class SevenWondersSimulator:
 
     def _apply_gravity(self) -> bool:
         """
-        Applies gravity to the board, causing all contents to fall down into empty spaces.
-        Background elements (stone, shield) remain in place.
-        
-        Returns:
-            bool: True if any piece moved, False otherwise
+        Drop everything as far as it can fall, then collect any fragment that reaches
+        the lowest playable cell of its column.
+
+        Returns
+        -------
+        moved : bool
+            True if any tile moved **or** a fragment was collected.
         """
         moved = False
-        
-        # Scan from bottom to top (excluding bottom row)
+
+        # ──────────────────────────────────────────
+        # A.   drop tiles column by column
+        # ──────────────────────────────────────────
         for c in range(self.cols):
-            for r in range(self.rows - 2, -1, -1):  # Start from second-to-last row, go up
-                # Skip if this position is outside the mask or empty
-                if not self.mask[r, c] or self.content[r, c] == self.EMPTY:
-                    continue
-                
-                # Find the furthest down this piece can fall
-                current_r = r
-                next_r = r + 1
-                
-                # Keep moving down as long as the next position is valid and empty
-                while (self._is_valid_coord(next_r, c) and 
-                       self.content[next_r, c] == self.EMPTY):
-                    current_r = next_r
-                    next_r = current_r + 1
-                
-                # If we found a position to move to
-                if current_r != r:
-                    # Move the content to the new position
-                    self.content[current_r, c] = self.content[r, c]
-                    self.content[r, c] = self.EMPTY
-                    moved = True
-        
+            # 'write' walks upward, always pointing at the next empty spot
+            write = None
+            for r in range(self.rows - 1, -1, -1):          # bottom → top
+                if not self._is_valid_coord(r, c):
+                    continue                                # skip holes
+
+                if self.content[r, c] == self.EMPTY:
+                    if write is None:
+                        write = r                           # first empty found
+                else:
+                    if write is not None:                   # found a piece above an empty
+                        self.content[write, c] = self.content[r, c]
+                        self.content[r, c] = self.EMPTY
+                        moved = True
+                        write -= 1                          # next empty is just above
+            # end for r
+        # end for c
+
+        # ──────────────────────────────────────────
+        # B.   collect fragments on the bottom
+        # ──────────────────────────────────────────
+        fragment_removed = False
+        for c in range(self.cols):
+            # locate the lowest playable square in this column
+            for r in range(self.rows - 1, -1, -1):
+                if self._is_valid_coord(r, c):
+                    if self.content[r, c] == self.FRAGMENT:
+                        self.content[r, c] = self.EMPTY
+                        self.fragments_on_board -= 1
+                        fragment_removed = moved = True
+                    break                                   # only the lowest cell matters
+
+        # if removing a fragment created gaps, do one extra gravity pass (iteration, not recursion)
+        if fragment_removed:
+            for c in range(self.cols):
+                write = None
+                for r in range(self.rows - 1, -1, -1):
+                    if not self._is_valid_coord(r, c):
+                        continue
+                    if self.content[r, c] == self.EMPTY:
+                        if write is None:
+                            write = r
+                    else:
+                        if write is not None:
+                            self.content[write, c] = self.content[r, c]
+                            self.content[r, c] = self.EMPTY
+                            moved = True
+                            write -= 1
+
         return moved
+
 
     def _refill_board(self) -> bool:
         """
-        Refills empty tiles with random gems and may spawn special tiles (bonus_2, fragment) in top row.
-        Returns True if any tiles were refilled.
+        Fill every EMPTY cell with a random gem.  The very first playable square
+        in each column is treated as the "top‑row" candidate for spawning specials.
+
+        Returns
+        -------
+        refilled : bool
+            True if any tile was created (gems, bonus_2 or fragment).
         """
         refilled = False
-        refilled_top_row = []
-        
-        # First, fill all empty tiles with random gems
-        for r in range(self.rows):
-            for c in range(self.cols):
-                if self._is_valid_coord(r, c) and self.content[r, c] == self.EMPTY:
-                    self.content[r, c] = random.randint(self.GEM_START_IDX, self.GEM_END_IDX)
-                    refilled = True
-                    # Track refilled positions in the top row
-                    if r == 0:
-                        refilled_top_row.append((r, c))
-        
-            
-        # Check if we should spawn bonus_2 (every 4 bonus2_trigger_count)
-        if self.bonus2_trigger_count > 0 and self.bonus2_trigger_count % 4 == 0 and refilled:
-            pos_idx = random.randrange(len(refilled_top_row))
-            pos = refilled_top_row.pop(pos_idx)
-            self.content[pos[0], pos[1]] = self.BONUS_2
-            refilled = True
-        
-        # Check if we should spawn fragment (when stones_cleared > 50% of initial_stones)
-        if (self.stones_cleared > self.initial_stones * 0.5 and 
-            self.fragments_on_board < self.max_fragments and refilled):
-            pos_idx = random.randrange(len(refilled_top_row))
-            pos = refilled_top_row[pos_idx]
-            self.content[pos[0], pos[1]] = self.FRAGMENT
-            self.fragments_on_board += 1
-            refilled = True
-            
-        return refilled
+        # track which top‑row squares were filled during this pass
+        freshly_filled_top = []
 
+        # ──────────────────────────────────────────
+        # A.   fill all empties + remember topmost ones
+        # ──────────────────────────────────────────
+        for c in range(self.cols):
+            top_playable_row = None
+            for r in range(self.rows):
+                if self._is_valid_coord(r, c):
+                    top_playable_row = r
+                    break
+            if top_playable_row is None:
+                continue                                   # column full of holes
+
+            for r in range(self.rows - 1, -1, -1):
+                if not self._is_valid_coord(r, c):
+                    continue
+                if self.content[r, c] == self.EMPTY:
+                    self.content[r, c] = random.randint(self.GEM_START_IDX,
+                                                    self.GEM_END_IDX)
+                    refilled = True
+                    if r == top_playable_row:
+                        freshly_filled_top.append((r, c))
+
+        # nothing special to place
+        if not freshly_filled_top:
+            return refilled
+
+        # ──────────────────────────────────────────
+        # B.   maybe place BONUS_2
+        # ──────────────────────────────────────────
+        if self.bonus2_trigger_count > 0 and self.bonus2_trigger_count % 4 == 0:
+            r, c = random.choice(freshly_filled_top)
+            self.content[r, c] = self.BONUS_2
+            freshly_filled_top.remove((r, c))
+            refilled = True
+
+        # ──────────────────────────────────────────
+        # C.   maybe place one‑time FRAGMENT
+        # ──────────────────────────────────────────
+        if (not self.fragment_spawned                               # only once, ever
+            and self.stones_cleared > self.initial_stones * 0.5
+            and self.fragments_on_board < self.max_fragments
+            and freshly_filled_top):
+            r, c = random.choice(freshly_filled_top)
+            self.content[r, c] = self.FRAGMENT
+            self.fragments_on_board += 1
+            self.fragment_spawned = True                            # lock out future spawns
+            refilled = True
+
+        return refilled
 
     # ---------------------------------------------------------------------
     # helper: reshuffle when stuck (gems+bonuses only)
     # ---------------------------------------------------------------------
     def _shuffle_board(self):
-        """Shuffle movable tiles until at least one valid swap exists."""
+        """Shuffle movable tiles until at least one valid swap exists and no matches are present."""
         movable = []
         for r in range(self.rows):
             for c in range(self.cols):
@@ -439,8 +499,7 @@ class SevenWondersSimulator:
         if not movable:  # pathological case
             return False
 
-        tries = 20
-        while tries:
+        while True:
             random.shuffle(movable)
             idx = 0
             for r in range(self.rows):
@@ -452,11 +511,11 @@ class SevenWondersSimulator:
                         self.content[r, c] = movable[idx]
                         idx += 1
 
-            if self.get_valid_swaps():  # success
+            # Check if there are matches on the board
+            matches = self._find_matches()
+            if not matches and self.get_valid_swaps():  # success: no matches, but valid swaps exist
                 return True
-            tries -= 1
-
-        return False  # give up; unlikely, but step() will end the game
+          
 
     # ---------------------------------------------------------------------
     # patched activate_bonus
@@ -470,8 +529,11 @@ class SevenWondersSimulator:
         bonus_type = self.content[r, c]
         affected, chained = set(), set()
         
-        # Add the bonus location itself to affected
-        affected.add((r, c))
+        # Store the current bonus position to prevent re-adding itself
+        current_bonus_pos = (r, c)
+        
+        # Add the bonus location itself to affected (it will get cleared)
+        affected.add(current_bonus_pos)
 
         def add_row(rr):
             # Add tiles to the right of the bonus
@@ -531,9 +593,11 @@ class SevenWondersSimulator:
 
         # chain‑react: pull out bonuses encountered
         for rr, cc in list(affected):
-            if self.BONUS_0 <= self.content[rr, cc] <= self.BONUS_2:
+            if self.BONUS_0 <= self.content[rr, cc] <= self.BONUS_2 and (rr, cc) != current_bonus_pos:
                 chained.add((rr, cc))
-                affected.remove((rr, cc))
+                affected.remove((rr, cc))   # remove the chained bonus so it won't be cleared twice
+        # keep current_bonus_pos in `affected` so it gets cleared this round
+
 
         return affected, chained
 
@@ -545,6 +609,7 @@ class SevenWondersSimulator:
         Execute one player swap, resolve all bonus chains + cascades, then return:
             (next_state, reward, done)
         """
+        print(f"Stepping with swap: {swap_action}")
         (r1, c1), (r2, c2) = swap_action
 
         # ---- 0. basic legality checks ------------------------------------
@@ -572,6 +637,7 @@ class SevenWondersSimulator:
         for pos in ((r1, c1), (r2, c2)):
             if self.BONUS_0 <= self.content[pos] <= self.BONUS_2:
                 bonuses_queue.add(pos)
+                print(f"Added bonus at {pos} to queue")
 
         # ---- 2. CASCADE LOOP --------------------------------------------
         while True:
@@ -582,6 +648,7 @@ class SevenWondersSimulator:
             while bonuses_queue:
                 br, bc = bonuses_queue.pop()
                 affected, chained = self._activate_bonus(br, bc)
+                print(f"Activated bonus at {br, bc}")
 
                 for ar, ac in affected:
                     if self.content[ar, ac] != self.FRAGMENT:
@@ -597,6 +664,7 @@ class SevenWondersSimulator:
 
             # B. match regular gems on the current static board ------------
             matches = self._find_matches()
+            print(f"Found {len(matches)} matches")
             if matches:
                 cleared.update(matches)
                 to_break.update(matches)
@@ -607,6 +675,7 @@ class SevenWondersSimulator:
                 
                 # Place bonuses at the appropriate positions
                 for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
+                    print(f"Placing bonus at {bonus_r, bonus_c}")
                     # The position will be cleared, then we'll place the bonus there
                     self.content[bonus_r, bonus_c] = bonus_type
                     # Remove from the cleared set so the bonus doesn't get removed
@@ -638,10 +707,13 @@ class SevenWondersSimulator:
 
             # E. gravity + refill (handles bonus‑2 & fragment drops) -------
             self._apply_gravity()
+            print(f"Applied gravity")
             self._refill_board()
+            print(f"Refilled board")
 
         # ---- 3. SHUFFLE IF STUCK ----------------------------------------
         if not self.get_valid_swaps():
+            print(f"No valid swaps, shuffling board")
             if not self._shuffle_board():  # shuffle failed to produce a move
                 return self._get_state_representation(), step_reward, True
 
@@ -651,6 +723,7 @@ class SevenWondersSimulator:
             and np.all(self.background != self.BG_SHIELD)
             and np.all(self.background != self.BG_STONE)
         ):
+            print(f"Win check passed")
             self.display()
             return self._get_state_representation(), step_reward + 1000, True
 
