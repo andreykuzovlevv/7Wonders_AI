@@ -193,100 +193,75 @@ class SevenWondersSimulator:
 
         return matches
 
+
     def _get_match_details(self, matches: Set[Tuple[int, int]], swap_action=None):
         """
-        Analyzes matches to identify distinct match clusters, calculate rewards,
-        and determine bonus placements for 4 and 5+ matches.
-        
-        Args:
-            matches: Set of (row, col) tuples of matching gem coordinates
-            swap_action: The action that caused this match, if any
-            
-        Returns:
-            Dictionary with match details:
-            - 'clusters': List of match clusters (each cluster is a set of coordinates)
-            - 'bonus_placements': List of (row, col, bonus_type) tuples for bonus placement
-            - 'total_reward': Total reward points for all clusters
+        Analyse the set of match‑coordinates and split them into true clusters
+        (connected, **same‑colour** groups).  Returns bonus placements and reward.
         """
-            
-        # Find distinct match clusters using BFS
         clusters = []
-        remaining = set(matches)
-        
+        remaining = set(matches)           # still unprocessed squares
+
+        DIRS = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+
+        # ────────────────────────────────────────────────────────────────
+        # 1.  Build connected components, colour‑aware
+        # ────────────────────────────────────────────────────────────────
         while remaining:
-            # Start a new cluster with the first remaining match
-            current = next(iter(remaining))
-            cluster = set()
-            queue = [current]
-            
-            # Add all connected matches to this cluster
+            start          = remaining.pop()                 # seed
+            colour         = self.content[start]             # gem ID at the seed
+            cluster        = {start}
+            queue          = deque([start])
+
             while queue:
-                r, c = queue.pop(0)
-                if (r, c) not in remaining:
-                    continue
-                    
-                cluster.add((r, c))
-                remaining.remove((r, c))
-                
-                # Add adjacent matches to the queue
-                for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-                    adj = (r + dr, c + dc)
-                    if adj in remaining:
-                        queue.append(adj)
-            
+                r, c = queue.popleft()
+                for dr, dc in DIRS:
+                    nr, nc = r + dr, c + dc
+                    if (nr, nc) in remaining and self.content[nr, nc] == colour:
+                        remaining.remove((nr, nc))
+                        cluster.add((nr, nc))
+                        queue.append((nr, nc))
+
             clusters.append(cluster)
-        
-        # Calculate bonus placements and rewards
+
+        # ────────────────────────────────────────────────────────────────
+        # 2.  Reward + bonus logic (unchanged apart from the loop header)
+        # ────────────────────────────────────────────────────────────────
         bonus_placements = []
-        total_reward = 0
-        
+        total_reward     = 0
+
         for cluster in clusters:
-            gem_type = self.content[next(iter(cluster))]
-            
-            # Calculate reward based on cluster size
-            # Base reward: 2 points per gem as in the step_reward logic
             cluster_size = len(cluster)
+            colour       = self.content[next(iter(cluster))]
+
             cluster_reward = 2 * cluster_size
-            
-            # Bonus rewards for larger matches
             if cluster_size >= 6:
-                # Extra points for very large clusters
                 cluster_reward += 10
-            elif cluster_size >= 5:
+            elif cluster_size == 5:
                 cluster_reward += 5
             elif cluster_size == 4:
                 cluster_reward += 2
-                
             total_reward += cluster_reward
-            
-            # Determine bonus placement for 4+ matches
-            if cluster_size >= 4:
-                # For 4-match, create BONUS_0 (row clear)
-                # For 5+ match, create BONUS_1 (row+col clear)
-                bonus_type = self.BONUS_0 if cluster_size == 4 else self.BONUS_1
-                
-                # Determine the best position for the bonus
-                # If this was from a swap, prefer the swapped position
-                if swap_action and (swap_action[0], swap_action[1]) in cluster:
-                    bonus_pos = (swap_action[0], swap_action[1])
-                else:
-                    # Otherwise choose center-most position in the cluster
-                    # Calculate average position
-                    avg_r = sum(r for r, _ in cluster) / len(cluster)
-                    avg_c = sum(c for _, c in cluster) / len(cluster)
-                    
-                    # Find closest position to average
-                    bonus_pos = min(cluster, key=lambda pos: 
-                                   (pos[0] - avg_r) ** 2 + (pos[1] - avg_c) ** 2)
-                
-                bonus_placements.append((*bonus_pos, bonus_type))
-        
-        return {
-            'clusters': clusters,
-            'bonus_placements': bonus_placements,
-            'total_reward': total_reward
-        }
 
+            # 4‑match → BONUS_0, 5+ → BONUS_1
+            if cluster_size >= 4:
+                bonus_type = self.BONUS_0 if cluster_size == 4 else self.BONUS_1
+
+                # choose bonus position
+                if swap_action and swap_action in cluster:
+                    bonus_pos = swap_action
+                else:                                  # centre‑of‑mass fallback
+                    ar = sum(r for r, _ in cluster) / cluster_size
+                    ac = sum(c for _, c in cluster) / cluster_size
+                    bonus_pos = min(cluster, key=lambda p: (p[0]-ar)**2 + (p[1]-ac)**2)
+
+                bonus_placements.append((*bonus_pos, bonus_type))
+
+        return {
+            "clusters":          clusters,
+            "bonus_placements":  bonus_placements,
+            "total_reward":      total_reward,
+        }
 
 
     def get_valid_swaps(self) -> List[Swap]:
@@ -466,6 +441,7 @@ class SevenWondersSimulator:
             self.content[r, c] = self.BONUS_2
             freshly_filled_top.remove((r, c))
             refilled = True
+            self.bonus2_trigger_count = 0
 
         # ──────────────────────────────────────────
         # C.   maybe place one‑time FRAGMENT
@@ -692,9 +668,10 @@ class SevenWondersSimulator:
 
             # D. break background tiles -----------------------------------
             for br, bc in bonus_breaks:
-                self.background[br, bc] = self.BG_NONE
-                self.stones_cleared += 1
-                step_reward += 5
+                if self.background[br, bc] != self.BG_NONE:
+                    self.background[br, bc] = self.BG_NONE
+                    self.stones_cleared += 1
+                    step_reward += 5
 
             for br, bc in to_break:
                 if self.background[br, bc] == self.BG_SHIELD:
