@@ -1,12 +1,12 @@
 # --- dqn_agent.py ---
 import random, numpy as np, torch, torch.nn.functional as F
 from collections import deque
-from dqn_model import QNetwork, device
+from .dqn_model import QNetwork
 import config
 
 class DQNAgent:
     """Stores (board, gfeat) separately so we don’t squeeze channels together."""
-    def __init__(self, state_shape, action_representation_size=4):
+    def __init__(self, state_shape):
         self.batch_size  = config.BATCH_SIZE
         self.gamma       = config.GAMMA
         self.tau         = config.TAU
@@ -16,15 +16,15 @@ class DQNAgent:
         random.seed(config.SEED)
         torch.manual_seed(config.SEED)
 
-        self.q_local  = QNetwork(state_shape[0]).to(device)
-        self.q_target = QNetwork(state_shape[0]).to(device)
+        self.q_local  = QNetwork(state_shape[0]).to(config.DEVICE)
+        self.q_target = QNetwork(state_shape[0]).to(config.DEVICE)
         self.opt      = torch.optim.Adam(self.q_local.parameters(), lr=config.LR)
 
     # ---------- utilities ----------
     def _norm_swap(self, swap, rows, cols):
         (r1,c1),(r2,c2) = swap
         return torch.tensor([[r1/rows, c1/cols, r2/rows, c2/cols]],
-                            dtype=torch.float32, device=device)
+                            dtype=torch.float32, device=config.DEVICE)
 
     def act(self, board, gfeat, valid_swaps, eps=0.0):
         if not valid_swaps:                       # no moves – let caller handle
@@ -34,8 +34,8 @@ class DQNAgent:
 
         self.q_local.eval()
         with torch.no_grad():
-            b = torch.from_numpy(board).unsqueeze(0).to(device)   # (1,C,H,W)
-            g = torch.from_numpy(gfeat).unsqueeze(0).to(device)   # (1,3)
+            b = torch.from_numpy(board).unsqueeze(0).to(config.DEVICE)   # (1,C,H,W)
+            g = torch.from_numpy(gfeat).unsqueeze(0).to(config.DEVICE)   # (1,3)
             q_best, a_best = -1e9, None
             for s in valid_swaps:
                 q = self.q_local(b, g, self._norm_swap(s,*board.shape[-2:])).item()
@@ -66,26 +66,26 @@ class DQNAgent:
          nboards, ngfeats, dones, valids) = zip(*experiences)
 
         B = len(boards)
-        boards  = torch.from_numpy(np.stack(boards)).float().to(device)          # (B,C,H,W)
-        gfeats  = torch.from_numpy(np.stack(gfeats)).float().to(device)          # (B,3)
+        boards  = torch.from_numpy(np.stack(boards)).float().to(config.DEVICE)          # (B,C,H,W)
+        gfeats  = torch.from_numpy(np.stack(gfeats)).float().to(config.DEVICE)          # (B,3)
         actions = torch.tensor(action_vecs, dtype=torch.float32,
-                               device=device) / torch.tensor(
+                               device=config.DEVICE) / torch.tensor(
                                [config.GRID_ROWS, config.GRID_COLS,
                                 config.GRID_ROWS, config.GRID_COLS],
-                               dtype=torch.float32, device=device)
+                               dtype=torch.float32, device=config.DEVICE)
 
         rewards = torch.tensor(rewards, dtype=torch.float32,
-                               device=device).unsqueeze(1)
-        nboards = torch.from_numpy(np.stack(nboards)).float().to(device)
-        ngfeats = torch.from_numpy(np.stack(ngfeats)).float().to(device)
+                               device=config.DEVICE).unsqueeze(1)
+        nboards = torch.from_numpy(np.stack(nboards)).float().to(config.DEVICE)
+        ngfeats = torch.from_numpy(np.stack(ngfeats)).float().to(config.DEVICE)
         dones   = torch.tensor(dones, dtype=torch.float32,
-                               device=device).unsqueeze(1)
+                               device=config.DEVICE).unsqueeze(1)
 
         # Q_expected
         Q_exp = self.q_local(boards, gfeats, actions)
 
         # Q_targets: for each next state, take max_a' Q_target(s',a')
-        Q_next = torch.zeros(B,1, device=device)
+        Q_next = torch.zeros(B,1, device=config.DEVICE)
         with torch.no_grad():
             for i, vlist in enumerate(valids):
                 if (dones[i] > 0) or (not vlist):

@@ -1,12 +1,13 @@
 # --- File: dqn_model.py ---
 import torch, torch.nn as nn, torch.nn.functional as F, config
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print(f"Using device: {config.DEVICE}")
 
 class QNetwork(nn.Module):
     def __init__(
         self, input_channels, action_dim=4, num_global_features=3
-    ):  # e.g., stone_norm, shield_norm, fragment_flag
+    ):  # e.g., stone_norm, fragment_on_board, step_count
         super().__init__()
         # CNN for board state
         self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1)

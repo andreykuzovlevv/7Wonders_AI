@@ -3,11 +3,6 @@ import numpy as np
 import random
 from typing import List, Tuple, Set
 from collections import deque
-
-import sys
-import os
-# Add parent directory to path to allow importing config
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # Type hint for a swap action
@@ -24,14 +19,14 @@ LEVEL_1 = {
         "#........#",
         "#...ss...#",
         "#........#",
-        "#........#",
+        "#...##...#",
         "##########",
     ]
 }
 
 
 class SevenWondersSimulator:
-    def __init__(self, rows=config.GRID_ROWS, cols=config.GRID_COLS, level=LEVEL_1):
+    def __init__(self, rows=config.GRID_ROWS, cols=config.GRID_COLS, level=LEVEL_1, debug_mode=False):
         # Allow configurable size, but default to config
         self.rows = rows
         self.cols = cols
@@ -44,6 +39,7 @@ class SevenWondersSimulator:
         self.fragments_on_board = 0
         self.max_fragments = 5  # Example limit
         self.fragment_spawned = False 
+        self.debug_mode = debug_mode  # Flag to control debug output
 
         # Map string names to integers using config
         self.map_fg = config.MAP_FG  # {'empty':0, 'gem_0':1, …, 'bonus_2':12}
@@ -68,6 +64,8 @@ class SevenWondersSimulator:
         self.level = level  # store level
         self.mask = None  # will be set in reset
 
+        self.step_count = 0
+
         self.reset()
 
     def reset(self):
@@ -78,6 +76,7 @@ class SevenWondersSimulator:
         self.fragments_on_board = 0
         self.initial_stones = 0
         self.fragment_spawned = False
+        self.step_count = 0
 
         # --- Board Initialization ---
         self._init_from_level(self.level)
@@ -126,6 +125,38 @@ class SevenWondersSimulator:
     def _is_valid_coord(self, r, c) -> bool:
         """Checks if coordinates are within the board bounds."""
         return 0 <= r < self.rows and 0 <= c < self.cols and self.mask[r, c]
+
+    def _run_length(self, line, pos, val, direction):
+        """Helper to count consecutive matching values in a line."""
+        count = 0
+        pos += direction
+        while 0 <= pos < len(line) and line[pos] == val:
+            count += 1
+            pos += direction
+        return count
+
+    def _swap_cells(self, r1, c1, r2, c2):
+        """Helper to swap two cells on the board."""
+        self.content[r1, c1], self.content[r2, c2] = self.content[r2, c2], self.content[r1, c1]
+
+    def swap_creates_match(self, r1, c1, r2, c2):
+        """Check if swapping two cells creates a match, only looking at affected rows/columns."""
+        for (r, c) in [(r1, c1), (r2, c2)]:
+            val = self.content[r, c]
+            
+            # Check horizontal matches
+            count = 1 + self._run_length(self.content[r, :], c, val, -1) \
+                      + self._run_length(self.content[r, :], c, val, +1)
+            if count >= 3:
+                return True
+
+            # Check vertical matches
+            count = 1 + self._run_length(self.content[:, c], r, val, -1) \
+                      + self._run_length(self.content[:, c], r, val, +1)
+            if count >= 3:
+                return True
+
+        return False
 
     def get_state_representation(self) -> np.ndarray:
         """
@@ -239,11 +270,11 @@ class SevenWondersSimulator:
 
             cluster_reward = 2 * cluster_size
             if cluster_size >= 6:
-                cluster_reward += 10
+                cluster_reward += 30
             elif cluster_size == 5:
-                cluster_reward += 5
+                cluster_reward += 20
             elif cluster_size == 4:
-                cluster_reward += 2
+                cluster_reward += 10
             total_reward += cluster_reward
 
             # 4‑match → BONUS_0, 5+ → BONUS_1
@@ -277,12 +308,12 @@ class SevenWondersSimulator:
         • Tiles may NOT be EMPTY or FRAGMENT.
         • If either tile is a BONUS (bonus_0, bonus_1, bonus_2) → the swap is
         immediately valid (bonuses always fire when moved).
-        • Otherwise the swap must create ≥ 1 gem match.
+        • Otherwise the swap must create ≥ 1 gem match.
         """
         valid_swaps: List[Swap] = []
 
         def is_swappable(r: int, c: int) -> bool:
-            """Can the tile at (r, c) take part in a swap?"""
+            """Can the tile at (r, c) take part in a swap?"""
             if not self._is_valid_coord(r, c):
                 return False
             # If you're using a mask for holes, skip them
@@ -308,11 +339,11 @@ class SevenWondersSimulator:
                         valid_swaps.append(((r, c), (r, c + 1)))
                     else:
                         # need to test for a resulting match
-                        self.content[r, c], self.content[r, c + 1] = t2, t1
-                        if self._find_matches():
+                        self._swap_cells(r, c, r, c + 1)
+                        if self.swap_creates_match(r, c, r, c + 1):
                             valid_swaps.append(((r, c), (r, c + 1)))
                         # restore board
-                        self.content[r, c], self.content[r, c + 1] = t1, t2
+                        self._swap_cells(r, c, r, c + 1)
 
                 # --- swap with bottom neighbour -------------------------------
                 if r + 1 < self.rows and is_swappable(r + 1, c):
@@ -321,10 +352,10 @@ class SevenWondersSimulator:
                     if is_bonus(t1) or is_bonus(t2):
                         valid_swaps.append(((r, c), (r + 1, c)))
                     else:
-                        self.content[r, c], self.content[r + 1, c] = t2, t1
-                        if self._find_matches():
+                        self._swap_cells(r, c, r + 1, c)
+                        if self.swap_creates_match(r, c, r + 1, c):
                             valid_swaps.append(((r, c), (r + 1, c)))
-                        self.content[r, c], self.content[r + 1, c] = t1, t2
+                        self._swap_cells(r, c, r + 1, c)
 
         return valid_swaps
 
@@ -588,19 +619,24 @@ class SevenWondersSimulator:
         Execute one player swap, resolve all bonus chains + cascades, then return:
             (next_state, reward, done)
         """
-        print(f"Stepping with swap: {swap_action}")
+        self.step_count += 1
+
+        if self.debug_mode:
+            print(f"Stepping with swap: {swap_action}")
         (r1, c1), (r2, c2) = swap_action
 
         # ---- 0. basic legality checks ------------------------------------
         if not (self._is_valid_coord(r1, c1) and self._is_valid_coord(r2, c2)):
-            self.display()
+            if self.debug_mode:
+                self.display()
             return self.get_state_representation(), -100, True
 
         if any(
             self.content[r, c] in (self.FRAGMENT, self.EMPTY)
             for r, c in ((r1, c1), (r2, c2))
         ):
-            self.display()
+            if self.debug_mode:
+                self.display()
             return self.get_state_representation(), -100, True
 
         # ---- 1. perform swap (background never moves) --------------------
@@ -609,14 +645,16 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        step_reward = -1  # tiny move cost
+        step_reward = -1 * self.step_count  # tiny move cost
+
         bonuses_queue = set()  # bonuses that will explode immediately
 
         # if the swap moved a bonus, queue it
         for pos in ((r1, c1), (r2, c2)):
             if self.BONUS_0 <= self.content[pos] <= self.BONUS_2:
                 bonuses_queue.add(pos)
-                print(f"Added bonus at {pos} to queue")
+                if self.debug_mode:
+                    print(f"Added bonus at {pos} to queue")
 
         # ---- 2. CASCADE LOOP --------------------------------------------
         while True:
@@ -631,7 +669,8 @@ class SevenWondersSimulator:
                 processed_bonuses.add((br, bc))
 
                 affected, chained = self._activate_bonus(br, bc)
-                print(f"Activated bonus at {br, bc}")
+                if self.debug_mode:
+                    print(f"Activated bonus at {br, bc}")
 
                 for ar, ac in affected:
                     if self.content[ar, ac] != self.FRAGMENT:
@@ -641,13 +680,14 @@ class SevenWondersSimulator:
                 # only queue bonuses that haven't fired yet
                 bonuses_queue.update(chained - processed_bonuses)   
 
-                step_reward += 5  # reward per bonus trigger
+                step_reward += 30  # reward per bonus trigger
 
           
 
             # B. match regular gems on the current static board ------------
             matches = self._find_matches()
-            print(f"Found {len(matches)} matches")
+            if self.debug_mode:
+                print(f"Found {len(matches)} matches")
             if matches:
                 cleared.update(matches)
                 to_break.update(matches)
@@ -658,7 +698,8 @@ class SevenWondersSimulator:
                 
                 # Place bonuses at the appropriate positions
                 for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
-                    print(f"Placing bonus at {bonus_r, bonus_c}")
+                    if self.debug_mode:
+                        print(f"Placing bonus at {bonus_r, bonus_c}")
                     # The position will be cleared, then we'll place the bonus there
                     self.content[bonus_r, bonus_c] = bonus_type
                     # Remove from the cleared set so the bonus doesn't get removed
@@ -673,31 +714,72 @@ class SevenWondersSimulator:
             for cr, cc in cleared:
                 self.content[cr, cc] = self.EMPTY
 
+            step_reward += len(cleared)
+
             # D. break background tiles -----------------------------------
             for br, bc in bonus_breaks:
                 if self.background[br, bc] != self.BG_NONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 5
+                    step_reward += 5 * self.step_count
 
             for br, bc in to_break:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_STONE
-                    step_reward += 3
+                    step_reward += 3 * self.step_count
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 5
+                    step_reward += 5 * self.step_count
 
             # E. gravity + refill (handles bonus‑2 & fragment drops) -------
+            
+            if self.fragments_on_board > 0:
+                fragment_coords_before = []
+                # Find each coordinate of the fragments before gravity
+                for r in range(self.rows):
+                    for c in range(self.cols):
+                        if self.content[r, c] == self.FRAGMENT:
+                            fragment_coords_before.append((r, c))
+                            
             self._apply_gravity()
-            print(f"Applied gravity")
+            if self.debug_mode:
+                print(f"Applied gravity")
+
+            # Calculate reward for fragment movement after gravity
+            if self.fragments_on_board > 0:
+                fragment_coords_after = []
+                # Find each coordinate of the fragments after gravity
+                for r in range(self.rows):
+                    for c in range(self.cols):
+                        if self.content[r, c] == self.FRAGMENT:
+                            fragment_coords_after.append((r, c))
+                
+                # Calculate movement and reward
+                fragment_movement_reward = 0
+                for before in fragment_coords_before:
+                    for after in fragment_coords_after:
+                        # Check if fragments are in the same column (they should be)
+                        if before[1] == after[1]:
+                            # Calculate how many rows the fragment moved down
+                            rows_moved = after[0] - before[0]
+                            if rows_moved > 0:  # Only reward downward movement
+                                fragment_movement_reward += rows_moved
+                
+                # Add the fragment movement reward to the total score
+                self.score += fragment_movement_reward * 20
+                
+                if self.debug_mode and fragment_movement_reward > 0:
+                    print(f"Fragment movement reward: {fragment_movement_reward}")
+
             self._refill_board()
-            print(f"Refilled board")
+            if self.debug_mode:
+                print(f"Refilled board")
 
         # ---- 3. SHUFFLE IF STUCK ----------------------------------------
         if not self.get_valid_swaps():
-            print(f"No valid swaps, shuffling board")
+            if self.debug_mode:
+                print(f"No valid swaps, shuffling board")
             if not self._shuffle_board():  # shuffle failed to produce a move
                 return self.get_state_representation(), step_reward, True
 
@@ -707,21 +789,31 @@ class SevenWondersSimulator:
             and np.all(self.background != self.BG_SHIELD)
             and np.all(self.background != self.BG_STONE)
         ):
-            print(f"Win check passed")
-            self.display()
-            return self.get_state_representation(), step_reward + 1000, True
+            if self.debug_mode:
+                print(f"Win check passed")
+                self.display()
+
+            def win_reward(step_count):
+                A = 5000
+                B = np.log(3) / 50
+                floor = 100
+                return A * np.exp(-B * step_count) + floor
+
+
+            return self.get_state_representation(), step_reward + win_reward(self.step_count), True
 
         # ---- 5. continue playing ----------------------------------------
         self.score += step_reward  # Add the step reward to the total score
-        self.display()
+        if self.debug_mode:
+            self.display()
         return self.get_state_representation(), step_reward, False
     
     def get_global_features(self) -> np.ndarray:
         """3 floats in [0,1] – tweak as you like."""
-        stones = self.stones_cleared / max(1, self.initial_stones)
-        shields = np.sum(self.background == self.BG_SHIELD) / (self.rows * self.cols)
-        fragments = self.fragments_on_board / self.max_fragments
-        return np.array([stones, shields, fragments], dtype=np.float32)
+        stones_ratio = self.stones_cleared / max(1, self.initial_stones)
+        fragments = self.fragments_on_board
+        step_count = self.step_count
+        return np.array([stones_ratio, fragments, step_count], dtype=np.float32)
 
     # convenience – one call returns everything the agent stores
     def get_state_tuple(self):
@@ -759,150 +851,6 @@ class SevenWondersSimulator:
         print("=" * (len(hline)))
 
 
-# --- Example Usage (for testing) ---
+
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='7 Wonders Game Simulator')
-    parser.add_argument('--interactive', action='store_true', help='Play the game interactively')
-    parser.add_argument('--level', type=str, default='1', help='Level to play (1-3)')
-    args = parser.parse_args()
-
-    # Example Level with Stones and Shields
-    TEST_LEVEL = {
-        "mask": [
-            "##########",
-            "#..ss..ss#",  # . = stone, s = shield
-            "#........#",
-            "#..####..#",  # Add some holes
-            "#..#ss#..#",
-            "#..#..#..#",
-            "#........#",
-            "#ss....ss#",
-            "#........#",
-            "##########",
-        ]
-    }
-    # Use a fixed seed for reproducible tests
-    random.seed(42)
-    np.random.seed(42)
-
-    if args.interactive:
-        print("Starting interactive mode...")
-        sim = SevenWondersSimulator(level=TEST_LEVEL)
-        print("Initial Board:")
-        sim.display()
-        
-        while True:
-            valid_swaps = sim.get_valid_swaps()
-            if not valid_swaps:
-                print("No valid moves left! Game Over!")
-                break
-                
-            print(f"\nValid moves: {len(valid_swaps)}")
-            print("Enter your move as 'r1,c1 r2,c2' (e.g., '1,2 1,3') or 'q' to quit:")
-            move = input().strip()
-            
-            if move.lower() == 'q':
-                print("Quitting game...")
-                break
-                
-            try:
-                # Parse the move
-                pos1, pos2 = move.split()
-                r1, c1 = map(int, pos1.split(','))
-                r2, c2 = map(int, pos2.split(','))
-                
-                # Check if the move is valid
-                move_valid = False
-                for swap in valid_swaps:
-                    if ((r1, c1) == swap[0] and (r2, c2) == swap[1]) or \
-                       ((r1, c1) == swap[1] and (r2, c2) == swap[0]):
-                        move_valid = True
-                        break
-                
-                if not move_valid:
-                    print("Invalid move! Try again.")
-                    continue
-                
-                # Execute the move
-                new_state, reward, done = sim.step(((r1, c1), (r2, c2)))
-                print(f"Move executed! Reward: {reward}")
-                
-                if done:
-                    print("Game Over!")
-                    break
-                    
-            except ValueError:
-                print("Invalid input format! Use 'r1,c1 r2,c2' format.")
-                continue
-                
-    else:
-        # Original automated game
-        sim = SevenWondersSimulator(level=TEST_LEVEL)
-        print("Initial Board:")
-        sim.display()
-
-        done = False
-        step_count = 0
-        max_steps = 50  # Limit steps for testing
-
-        while not done and step_count < max_steps:
-            print(f"\n M A I N   L O O P --- Step {step_count + 1} ---")
-            valid_swaps = sim.get_valid_swaps()
-            print(f"Found {len(valid_swaps)} valid swaps.")
-
-            if not valid_swaps:
-                Exception("No valid swaps available!")
-                break
-
-            # --- Simple Test Strategy: prioritize bonus swaps/matches ---
-            best_action = None
-            # 1. Swap involving a bonus?
-            bonus_swaps = [
-                s
-                for s in valid_swaps
-                if sim.BONUS_0 <= sim.content[s[0]] <= sim.BONUS_2
-                or sim.BONUS_0 <= sim.content[s[1]] <= sim.BONUS_2
-            ]
-            if bonus_swaps:
-                best_action = random.choice(bonus_swaps)
-                print("Choosing a bonus swap action.")
-            else:
-                # 2. Swap creating a 4+ match? (Simulate swap and check)
-                potential_big_match_swaps = []
-                for swap in valid_swaps:
-                    (r1, c1), (r2, c2) = swap
-                    t1, t2 = sim.content[r1, c1], sim.content[r2, c2]
-                    sim.content[r1, c1], sim.content[r2, c2] = t2, t1  # Test swap
-                    matches = sim._find_matches()
-                    if matches:
-                        details = sim._get_match_details(
-                            matches, (r1, c1)
-                        )  # Pass one loc for potential bonus check
-                        if details["5_matches"] or details["4_matches"]:
-                            potential_big_match_swaps.append(swap)
-                    sim.content[r1, c1], sim.content[r2, c2] = t1, t2  # Swap back
-                if potential_big_match_swaps:
-                    best_action = random.choice(potential_big_match_swaps)
-                    print("Choosing a swap creating potential 4/5 match.")
-                else:
-                    # 3. Just pick a random valid swap
-                    best_action = random.choice(valid_swaps)
-                    print("Choosing a random valid swap.")
-
-            action = best_action
-            print(f"Performing action: {action}")
-
-            # Execute the step
-            new_state, reward, done = sim.step(action)
-
-            print(f"Step {step_count+1} completed. Reward: {reward}, Done: {done}")
-            step_count += 1
-
-        print("\nSimulation finished.")
-        if done:
-            print(f"Game ended naturally after {step_count} steps.")
-        else:
-            print(f"Max steps ({max_steps}) reached.")
-        print(f"Final Score: {sim.score}")
+    pass
