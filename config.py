@@ -42,7 +42,7 @@ NUM_GLOBAL_FEATURES = 3 # e.g., stone_norm, shield_norm, fragment_flag
 ACTION_DIM = 4         # r1, c1, r2, c2
 MAX_ACTIONS = GRID_ROWS * GRID_COLS * 4   
 
-DEVICE = torch.device("cpu") # "cuda" if torch.cuda.is_available() else 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") # 
 
 LEVEL_1 = {
     "mask": [
@@ -106,6 +106,21 @@ LEVEL_4 = {
 
 LEVEL_5 = {
     "mask": [
+        "###....###",
+        "..........",
+        "...ssss...",
+        "..........",
+        "###....###",
+        "..........",
+        "..........",
+        "...ssss...",
+        "..........",
+        "..######..",
+    ]
+}
+
+LEVEL_6 = {
+    "mask": [
         "###.##.###",
         "....##....",
         "..........",
@@ -118,3 +133,4 @@ LEVEL_5 = {
         "..######..",
     ]
 }
+

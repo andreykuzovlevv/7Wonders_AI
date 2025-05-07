@@ -4,7 +4,7 @@ import random
 from typing import List, Tuple, Set
 from collections import deque
 import config
-
+import math
 # Type hint for a swap action
 Coord = Tuple[int, int]
 Swap = Tuple[Coord, Coord]
@@ -710,7 +710,7 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        step_reward = -1 * self.step_count  # tiny move cost
+        step_reward = -1 * self.step_count  # move cost
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -781,21 +781,25 @@ class SevenWondersSimulator:
 
             step_reward += len(cleared)
 
+            floor = 1.0
+            A, mid, k = 350.0, 70.0, 0.07
+            m = (A - floor) / (1 + math.exp(k * (self.step_count - mid))) + floor
+
             # D. break background tiles -----------------------------------
             for br, bc in bonus_breaks:
                 if self.background[br, bc] != self.BG_NONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 5 * self.step_count
+                    step_reward += m
 
             for br, bc in to_break:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_STONE
-                    step_reward += 3 * self.step_count
+                    step_reward += m * 0.5
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 5 * self.step_count
+                    step_reward += m
 
             # E. gravity + refill (handles bonus‑2 & fragment drops) -------
             
@@ -877,7 +881,7 @@ class SevenWondersSimulator:
         """3 floats in [0,1] – tweak as you like."""
         stones_ratio = self.stones_cleared / max(1, self.initial_stones)
         fragments = self.fragments_on_board 
-        step_count = self.step_count / 500
+        step_count = self.step_count / 400
         return np.array([stones_ratio, fragments, step_count], dtype=np.float32)
 
     # convenience – one call returns everything the agent stores

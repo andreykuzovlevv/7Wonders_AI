@@ -7,13 +7,19 @@ from tqdm import trange
 import config
 
 LEVELS = [config.LEVEL_1, config.LEVEL_2, config.LEVEL_3,
-          config.LEVEL_4, config.LEVEL_5]
+          config.LEVEL_4, config.LEVEL_5, config.LEVEL_6]
 
 env   = SevenWondersSimulator(level=LEVELS[0])   # dummy init – will reset each ep
 agent = DQNAgent()
 
-def train(n_episodes=2000, max_t=400,
-          eps_start=1.0, eps_end=0.05, eps_decay=0.997):
+# Load the existing model checkpoint
+checkpoint_path = 'q_local_ep400.pth'
+agent.q_local.load_state_dict(torch.load(checkpoint_path))
+agent.q_target.load_state_dict(torch.load(checkpoint_path))  # Also update target network
+print(f"Loaded model from {checkpoint_path}")
+
+def train(n_episodes=600, max_t=400,
+          eps_start=0.35, eps_end=0.05, eps_decay=0.997):
 
     scores, scores_window = [], deque(maxlen=100)
     eps = eps_start
