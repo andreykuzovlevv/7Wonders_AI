@@ -1,48 +1,80 @@
-# --- File: dqn_model.py ---
-import torch, torch.nn as nn, torch.nn.functional as F, config
-
+# --- File: dqn_model.py ----------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import config                           # same file you already use
 
 print(f"Using device: {config.DEVICE}")
 
-class QNetwork(nn.Module):
-    def __init__(
-        self, input_channels, action_dim=4, num_global_features=3
-    ):  # e.g., stone_norm, fragment_on_board, step_count
+# --------------------------------------------------------------------------
+# 1️⃣  Residual Block
+# --------------------------------------------------------------------------
+class ResBlock(nn.Module):
+    def __init__(self, channels: int):
         super().__init__()
-        # CNN for board state
-        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.fc1 = nn.Linear(
-            64 * config.GRID_ROWS * config.GRID_COLS, 128
-        )  # Spatial features size
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1   = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2   = nn.BatchNorm2d(channels)
 
-        # Branch for global state features
-        self.fc_global1 = nn.Linear(num_global_features, 16)  # Global features size
+    def forward(self, x):
+        skip = x
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
+        x = F.relu(x + skip)
+        return x
 
-        # Branch for action representation
-        self.fc_action1 = nn.Linear(action_dim, 32)  # Action features size
+# --------------------------------------------------------------------------
+# 2️⃣  Dueling‑DQN Network
+#    • Takes the whole state once and returns Q‑values for every swap id
+#    • You mask illegal actions *outside* the network
+# --------------------------------------------------------------------------
+class QNetwork(nn.Module):
+    def __init__(self, num_actions=config.MAX_ACTIONS, num_global_features: int = 3):
+        super().__init__()
 
-        # Combine state (spatial + global) and action features
-        combined_feature_size = 128 + 16 + 32
-        self.fc_combine1 = nn.Linear(combined_feature_size, 64)
-        self.fc_output = nn.Linear(64, 1)  # Output single Q-value
+        # ---------- visual backbone ---------------------------------------
+        self.stem = nn.Sequential(
+            nn.Conv2d(config.N_PLANES, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
+        self.res_layers = nn.Sequential(*[ResBlock(64) for _ in range(6)])
 
-    def forward(self, state_tensor, global_features_tensor, action_tensor):
-        # Process spatial state through CNN
-        x_spatial = F.relu(self.conv1(state_tensor))
-        x_spatial = F.relu(self.conv2(x_spatial))
-        x_spatial = x_spatial.view(x_spatial.size(0), -1)  # Flatten
-        x_spatial = F.relu(self.fc1(x_spatial))
+        flat_size = 64 * config.GRID_ROWS * config.GRID_COLS
 
-        # Process global state features
-        x_global = F.relu(self.fc_global1(global_features_tensor))
+        # ---------- non‑visual branch -------------------------------------
+        self.fc_global = nn.Sequential(
+            nn.Linear(num_global_features, 64),
+            nn.ReLU(inplace=True),
+        )
 
-        # Process action
-        x_action = F.relu(self.fc_action1(action_tensor))
+        # ---------- head ---------------------------------------------------
+        self.fc_shared = nn.Sequential(
+            nn.Linear(flat_size + 64, 256),
+            nn.ReLU(inplace=True),
+        )
 
-        # Combine and produce Q-value
-        # Ensure tensors are correctly shaped (batch_size, feature_size)
-        x_combined = torch.cat((x_spatial, x_global, x_action), dim=1)
-        x_combined = F.relu(self.fc_combine1(x_combined))
-        q_value = self.fc_output(x_combined)
-        return q_value
+        # Dueling split: value & advantage
+        self.fc_value = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 1))
+        self.fc_adv   = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, num_actions))
+
+    def forward(self, state, global_feat):
+        """
+        state        : (B, 17, H, W) float32
+        global_feat  : (B, 3)         float32
+        returns      : (B, num_actions) Q‑values  (no masking here)
+        """
+        x = self.stem(state)
+        x = self.res_layers(x)
+        x = x.flatten(start_dim=1)                     # (B, flat_size)
+
+        g = self.fc_global(global_feat)
+
+        x = torch.cat([x, g], dim=1)
+        x = self.fc_shared(x)
+
+        v = self.fc_value(x)                           # (B, 1)
+        a = self.fc_adv(x)                             # (B, num_actions)
+        q = v + (a - a.mean(dim=1, keepdim=True))      # dueling combine
+        return q

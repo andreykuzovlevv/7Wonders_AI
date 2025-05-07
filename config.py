@@ -22,6 +22,11 @@ CONTENT_CLASSES = (
 )  # total 13
 BACKGROUND_CLASSES = ["none", "stone", "shield"]  # 0-2
 
+
+N_CONTENT = len(CONTENT_CLASSES)           # 13
+N_BG      = len(BACKGROUND_CLASSES)        # 3
+N_PLANES  = N_CONTENT + N_BG + 1           # +1 for mask ⟹ 17
+
 MAP_FG = {c: i for i, c in enumerate(CONTENT_CLASSES)}
 MAP_BG = {c: i for i, c in enumerate(BACKGROUND_CLASSES)}
 
@@ -35,5 +40,81 @@ TAU = 1e-3             # For soft update of target parameters
 UPDATE_EVERY = 8       # How often to update the network
 NUM_GLOBAL_FEATURES = 3 # e.g., stone_norm, shield_norm, fragment_flag
 ACTION_DIM = 4         # r1, c1, r2, c2
+MAX_ACTIONS = GRID_ROWS * GRID_COLS * 4   
 
 DEVICE = torch.device("cpu") # "cuda" if torch.cuda.is_available() else 
+
+LEVEL_1 = {
+    "mask": [
+        "##########",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "##########",
+    ]
+}
+
+LEVEL_2 = {
+    "mask": [
+        "##########",
+        "#...##...#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "##########",
+    ]
+}
+
+LEVEL_3 = {
+    "mask": [
+        "##########",
+        "#........#",
+        "#........#",
+        "#..ssss..#",
+        "#..ssss..#",
+        "#..ssss..#",
+        "#..ssss..#",
+        "#........#",
+        "#........#",
+        "##########",
+    ]
+}
+
+LEVEL_4 = {
+    "mask": [
+        "########..",
+        "#######...",
+        "######....",
+        "#####.....",
+        "####......",
+        "###.......",
+        "##........",
+        "#.........",
+        "..........",
+        "..........",
+    ]
+}
+
+LEVEL_5 = {
+    "mask": [
+        "###.##.###",
+        "....##....",
+        "..........",
+        "#........#",
+        "###....###",
+        "#........#",
+        "...ssss...",
+        "...ssss...",
+        "..........",
+        "..######..",
+    ]
+}

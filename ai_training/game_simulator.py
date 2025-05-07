@@ -12,18 +12,77 @@ Swap = Tuple[Coord, Coord]
 LEVEL_1 = {
     "mask": [
         "##########",
-        "#...##...#",
-        "#...ss...#",
         "#........#",
-        "#...ss...#",
         "#........#",
-        "#...ss...#",
         "#........#",
-        "#...##...#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
         "##########",
     ]
 }
 
+LEVEL_2 = {
+    "mask": [
+        "##########",
+        "#...##...#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "#........#",
+        "##########",
+    ]
+}
+
+LEVEL_3 = {
+    "mask": [
+        "##########",
+        "#........#",
+        "#........#",
+        "#..ssss..#",
+        "#..ssss..#",
+        "#..ssss..#",
+        "#..ssss..#",
+        "#........#",
+        "#........#",
+        "##########",
+    ]
+}
+
+LEVEL_4 = {
+    "mask": [
+        "########..",
+        "#######...",
+        "######....",
+        "#####.....",
+        "####......",
+        "###.......",
+        "##........",
+        "#.........",
+        "..........",
+        "..........",
+    ]
+}
+
+LEVEL_5 = {
+    "mask": [
+        "###.##.###",
+        "....##....",
+        "..........",
+        "#........#",
+        "###....###",
+        "#........#",
+        "...ssss...",
+        "...ssss...",
+        "..........",
+        "..######..",
+    ]
+}
 
 class SevenWondersSimulator:
     def __init__(self, rows=config.GRID_ROWS, cols=config.GRID_COLS, level=LEVEL_1, debug_mode=False):
@@ -160,17 +219,23 @@ class SevenWondersSimulator:
 
     def get_state_representation(self) -> np.ndarray:
         """
-        Converts the current board state (content, background) into a numerical
-        representation suitable for the DQN agent (e.g., a multi-channel NumPy array).
-        Channels could represent:
-        - Content type (one-hot encoded or integer mapped)
-        - Background type
-        - Special properties (e.g., is_bonus, is_fragment)
+        Returns a (17, rows, cols) float32 tensor:
+        • 13 one‑hot planes for `content`
+        • 3  one‑hot planes for `background`
+        • 1  binary plane for `mask` (holes)
         """
-        # Simple example: 2 channels (content index, background index)
-        # Normalize? Maybe later. DQN conv layers can learn scaling.
-        state = np.stack([self.content, self.background], axis=0).astype(np.float32)
-        # Shape: (2, self.rows, self.cols) - Matches QNetwork input_channels=2 expectation
+        # --- 13 content planes --------------------------------------------------
+        content_oh = np.eye(config.N_CONTENT, dtype=np.float32)[self.content]          # (rows, cols, 13)
+        content_oh = np.transpose(content_oh, (2, 0, 1))                        # (13, rows, cols)
+
+        # --- 3 background planes ----------------------------------------------
+        bg_oh = np.eye(config.N_BG, dtype=np.float32)[self.background]                 # (rows, cols, 3)
+        bg_oh = np.transpose(bg_oh, (2, 0, 1))                                  # (3, rows, cols)
+
+        # --- 1 mask plane ------------------------------------------------------
+        mask_plane = self.mask.astype(np.float32)[None, ...]                    # (1, rows, cols)
+
+        state = np.concatenate([content_oh, bg_oh, mask_plane], axis=0)         # (17, rows, cols)
         return state
 
     def _find_matches(self) -> Set[Tuple[int, int]]:
@@ -811,8 +876,8 @@ class SevenWondersSimulator:
     def get_global_features(self) -> np.ndarray:
         """3 floats in [0,1] – tweak as you like."""
         stones_ratio = self.stones_cleared / max(1, self.initial_stones)
-        fragments = self.fragments_on_board
-        step_count = self.step_count
+        fragments = self.fragments_on_board 
+        step_count = self.step_count / 500
         return np.array([stones_ratio, fragments, step_count], dtype=np.float32)
 
     # convenience – one call returns everything the agent stores
