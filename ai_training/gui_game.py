@@ -2,6 +2,7 @@ import pygame
 import os
 import sys
 from .game_simulator import SevenWondersSimulator, LEVEL_1
+import config
 
 # Initialize Pygame
 pygame.init()
@@ -18,15 +19,17 @@ WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 GRAY = (128, 128, 128)
 HIGHLIGHT = (255, 255, 0, 128)  # Yellow with transparency
+VALID_MOVE_HIGHLIGHT = (0, 0, 255, 64)  # Blue with transparency
 
 class SevenWondersGUI:
     def __init__(self):
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         pygame.display.set_caption("7 Wonders")
         self.clock = pygame.time.Clock()
-        self.game = SevenWondersSimulator(level=LEVEL_1)
+        self.game = SevenWondersSimulator(level=config.LEVEL_6)
         self.selected_tile = None
         self.load_assets()
+        self.valid_moves = []  # Store valid moves
         
     def load_assets(self):
         """Load all game assets"""
@@ -90,6 +93,9 @@ class SevenWondersGUI:
         """Draw the game board"""
         self.screen.fill(WHITE)
         
+        # Update valid moves
+        self.valid_moves = self.game.get_valid_swaps()
+        
         # Draw grid
         for r in range(self.game.rows):
             for c in range(self.game.cols):
@@ -124,19 +130,65 @@ class SevenWondersGUI:
                     highlight = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
                     highlight.fill(HIGHLIGHT)
                     self.screen.blit(highlight, (x, y))
+                
+                # Draw valid move highlight
+                for move in self.valid_moves:
+                    if (r, c) in move:
+                        highlight = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+                        highlight.fill(VALID_MOVE_HIGHLIGHT)
+                        self.screen.blit(highlight, (x, y))
         
         # Draw score
-        font = pygame.font.Font(None, 36)
-        score_text = font.render(f'Score: {self.game.score}', True, BLACK)
+        font = pygame.font.Font(None, 24)  # Smaller font size
+        score_text = font.render(f'Score: {self.game.score:.2f}', True, BLACK)
         self.screen.blit(score_text, (10, SCREEN_HEIGHT - 40))
         
         # Draw stones cleared
         stones_text = font.render(f'Stones: {self.game.stones_cleared}/{self.game.initial_stones}', True, BLACK)
-        self.screen.blit(stones_text, (200, SCREEN_HEIGHT - 40))
+        self.screen.blit(stones_text, (SCREEN_WIDTH * 0.25, SCREEN_HEIGHT - 40))
         
         # Draw fragments
         fragments_text = font.render(f'Fragments: {self.game.fragments_on_board}', True, BLACK)
-        self.screen.blit(fragments_text, (400, SCREEN_HEIGHT - 40))
+        self.screen.blit(fragments_text, (SCREEN_WIDTH * 0.5, SCREEN_HEIGHT - 40))
+
+        # Draw steps
+        steps_text = font.render(f'Steps: {self.game.step_count}', True, BLACK)
+        self.screen.blit(steps_text, (SCREEN_WIDTH * 0.75, SCREEN_HEIGHT - 40))
+
+        # Draw available moves with wrapping
+        moves_font = pygame.font.Font(None, 18)  # Even smaller font for moves
+        moves = self.game.get_valid_swaps()
+        moves_text = f'Moves: {len(moves)}'
+        moves_surface = moves_font.render(moves_text, True, BLACK)
+        self.screen.blit(moves_surface, (10, SCREEN_HEIGHT - 100))
+
+        # Draw moves details with wrapping
+        if moves:
+            line_height = 20
+            max_width = SCREEN_WIDTH - 20  # Leave some margin
+            current_y = SCREEN_HEIGHT - 80
+            current_x = 10
+            current_line = ""
+
+            for move in moves:
+                move_str = f"({move[0][0]},{move[0][1]})-({move[1][0]},{move[1][1]})"
+                test_line = current_line + " " + move_str if current_line else move_str
+                test_surface = moves_font.render(test_line, True, BLACK)
+                
+                if test_surface.get_width() > max_width:
+                    # Draw current line and start new one
+                    if current_line:
+                        moves_surface = moves_font.render(current_line, True, BLACK)
+                        self.screen.blit(moves_surface, (current_x, current_y))
+                        current_y += line_height
+                    current_line = move_str
+                else:
+                    current_line = test_line
+
+            # Draw the last line if there is one
+            if current_line:
+                moves_surface = moves_font.render(current_line, True, BLACK)
+                self.screen.blit(moves_surface, (current_x, current_y))
         
     def handle_click(self, pos):
         """Handle mouse click"""

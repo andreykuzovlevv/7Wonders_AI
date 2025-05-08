@@ -71,6 +71,21 @@ LEVEL_4 = {
 
 LEVEL_5 = {
     "mask": [
+        "###....###",
+        "..........",
+        "...ssss...",
+        "..........",
+        "###....###",
+        "..........",
+        "..........",
+        "...ssss...",
+        "..........",
+        "...####...",
+    ]
+}
+
+LEVEL_6 = {
+    "mask": [
         "###.##.###",
         "....##....",
         "..........",
@@ -80,12 +95,12 @@ LEVEL_5 = {
         "...ssss...",
         "...ssss...",
         "..........",
-        "..######..",
+        "...####...",
     ]
 }
 
 class SevenWondersSimulator:
-    def __init__(self, rows=config.GRID_ROWS, cols=config.GRID_COLS, level=LEVEL_1, debug_mode=False):
+    def __init__(self, rows=config.GRID_ROWS, cols=config.GRID_COLS, level=LEVEL_6, debug_mode=False):
         # Allow configurable size, but default to config
         self.rows = rows
         self.cols = cols
@@ -185,14 +200,17 @@ class SevenWondersSimulator:
         """Checks if coordinates are within the board bounds."""
         return 0 <= r < self.rows and 0 <= c < self.cols and self.mask[r, c]
 
-    def _run_length(self, line, pos, val, direction):
+    def _run_length(self, line, line_mask, pos, val, direction):
         """Helper to count consecutive matching values in a line."""
         count = 0
         pos += direction
-        while 0 <= pos < len(line) and line[pos] == val:
+        while 0 <= pos < len(line) \
+            and line_mask[pos] \
+            and line[pos] == val:
             count += 1
             pos += direction
         return count
+
 
     def _swap_cells(self, r1, c1, r2, c2):
         """Helper to swap two cells on the board."""
@@ -202,20 +220,20 @@ class SevenWondersSimulator:
         """Check if swapping two cells creates a match, only looking at affected rows/columns."""
         for (r, c) in [(r1, c1), (r2, c2)]:
             val = self.content[r, c]
-            
-            # Check horizontal matches
-            count = 1 + self._run_length(self.content[r, :], c, val, -1) \
-                      + self._run_length(self.content[r, :], c, val, +1)
-            if count >= 3:
+
+            # horizontal
+            h = 1 + self._run_length(self.content[r, :], self.mask[r, :], c, val, -1) \
+                + self._run_length(self.content[r, :], self.mask[r, :], c, val, +1)
+            if h >= 3:
                 return True
 
-            # Check vertical matches
-            count = 1 + self._run_length(self.content[:, c], r, val, -1) \
-                      + self._run_length(self.content[:, c], r, val, +1)
-            if count >= 3:
+            # vertical
+            v = 1 + self._run_length(self.content[:, c], self.mask[:, c], r, val, -1) \
+                + self._run_length(self.content[:, c], self.mask[:, c], r, val, +1)
+            if v >= 3:
                 return True
-
         return False
+
 
     def get_state_representation(self) -> np.ndarray:
         """
@@ -574,22 +592,19 @@ class SevenWondersSimulator:
         if not movable:  # pathological case
             return False
 
-        while True:
-            random.shuffle(movable)
-            idx = 0
-            for r in range(self.rows):
-                for c in range(self.cols):
-                    if not self._is_valid_coord(r, c):
-                        continue
-                    t = self.content[r, c]
-                    if t != self.EMPTY and t != self.FRAGMENT:
-                        self.content[r, c] = movable[idx]
-                        idx += 1
+        random.shuffle(movable)
+        idx = 0
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if not self._is_valid_coord(r, c):
+                    continue
+                t = self.content[r, c]
+                if t != self.EMPTY and t != self.FRAGMENT:
+                    self.content[r, c] = movable[idx]
+                    idx += 1
 
-            # Check if there are matches on the board
-            matches = self._find_matches()
-            if not matches and self.get_valid_swaps():  # success: no matches, but valid swaps exist
-                return True
+        if self.get_valid_swaps():
+            return True
           
 
     # ---------------------------------------------------------------------
@@ -845,12 +860,14 @@ class SevenWondersSimulator:
             if self.debug_mode:
                 print(f"Refilled board")
 
-        # ---- 3. SHUFFLE IF STUCK ----------------------------------------
-        if not self.get_valid_swaps():
-            if self.debug_mode:
-                print(f"No valid swaps, shuffling board")
-            if not self._shuffle_board():  # shuffle failed to produce a move
-                return self.get_state_representation(), step_reward, True
+            # ---- 3. SHUFFLE IF STUCK ----------------------------------------
+            if not self.get_valid_swaps():
+                if self.debug_mode:
+                    print(f"No valid swaps, shuffling board")
+                if not self._shuffle_board():  # shuffle failed to produce a move
+                    return self.get_state_representation(), step_reward, True
+
+        
 
         # ---- 4. WIN CHECK -----------------------------------------------
         if (
