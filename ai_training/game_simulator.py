@@ -24,83 +24,8 @@ LEVEL_1 = {
     ]
 }
 
-LEVEL_2 = {
-    "mask": [
-        "##########",
-        "#...##...#",
-        "#........#",
-        "#........#",
-        "#........#",
-        "#........#",
-        "#........#",
-        "#........#",
-        "#........#",
-        "##########",
-    ]
-}
-
-LEVEL_3 = {
-    "mask": [
-        "##########",
-        "#........#",
-        "#........#",
-        "#..ssss..#",
-        "#..ssss..#",
-        "#..ssss..#",
-        "#..ssss..#",
-        "#........#",
-        "#........#",
-        "##########",
-    ]
-}
-
-LEVEL_4 = {
-    "mask": [
-        "########..",
-        "#######...",
-        "######....",
-        "#####.....",
-        "####......",
-        "###.......",
-        "##........",
-        "#.........",
-        "..........",
-        "..........",
-    ]
-}
-
-LEVEL_5 = {
-    "mask": [
-        "###....###",
-        "..........",
-        "...ssss...",
-        "..........",
-        "###....###",
-        "..........",
-        "..........",
-        "...ssss...",
-        "..........",
-        "...####...",
-    ]
-}
-
-LEVEL_6 = {
-    "mask": [
-        "###.##.###",
-        "....##....",
-        "..........",
-        "#........#",
-        "###....###",
-        "#........#",
-        "...ssss...",
-        "...ssss...",
-        "..........",
-        "...####...",
-    ]
-}
-
 class SevenWondersSimulator:
-    def __init__(self, rows=config.GRID_ROWS, cols=config.GRID_COLS, level=LEVEL_6, debug_mode=False):
+    def __init__(self, rows=config.GRID_ROWS, cols=config.GRID_COLS, level=LEVEL_1, debug_mode=False):
         # Allow configurable size, but default to config
         self.rows = rows
         self.cols = cols
@@ -182,15 +107,11 @@ class SevenWondersSimulator:
                     self.background[r, c] = self.BG_STONE
                 else:
                     raise ValueError(f"Invalid level character: {ch}")
-
-        # Ensure no initial matches
-        while self._find_matches():
-            for r in range(self.rows):
-                for c in range(self.cols):
-                    if self.mask[r, c]:
-                        self.content[r, c] = random.randint(
-                            self.GEM_START_IDX, self.GEM_END_IDX
-                        )
+        if not self.get_valid_swaps() and self._find_matches():
+            while True:
+                self._shuffle_board()          # split filler into a helper
+                if not self._find_matches():
+                    break
 
         self.initial_stones = np.sum(
             (self.background == self.BG_STONE) | (self.background == self.BG_SHIELD)
@@ -442,70 +363,47 @@ class SevenWondersSimulator:
 
         return valid_swaps
 
-    def _apply_gravity(self) -> bool:
-        """
-        Drop everything as far as it can fall, then collect any fragment that reaches
-        the lowest playable cell of its column.
 
-        Returns
-        -------
-        moved : bool
-            True if any tile moved **or** a fragment was collected.
-        """
+    def _apply_gravity(self) -> bool:
         moved = False
 
-        # ──────────────────────────────────────────
-        # A.   drop tiles column by column
-        # ──────────────────────────────────────────
         for c in range(self.cols):
-            # 'write' walks upward, always pointing at the next empty spot
-            write = None
-            for r in range(self.rows - 1, -1, -1):          # bottom → top
+            # 1. collect all tiles that are allowed to fall (bottom → top)
+            falling = []
+            for r in range(self.rows - 1, -1, -1):
                 if not self._is_valid_coord(r, c):
-                    continue                                # skip holes
+                    continue
+                if self.content[r, c] != self.EMPTY:
+                    falling.append(self.content[r, c])
 
-                if self.content[r, c] == self.EMPTY:
-                    if write is None:
-                        write = r                           # first empty found
-                else:
-                    if write is not None:                   # found a piece above an empty
-                        self.content[write, c] = self.content[r, c]
-                        self.content[r, c] = self.EMPTY
-                        moved = True
-                        write -= 1                          # next empty is just above
-            # end for r
-        # end for c
+            # 2. write them back, bottom-up, skipping holes on the way
+            r = self.rows - 1
+            for tile in falling:
+                while r >= 0 and not self._is_valid_coord(r, c):
+                    r -= 1
+                if r < 0:
+                    break
+                if self.content[r, c] != tile:
+                    moved = True
+                self.content[r, c] = tile
+                r -= 1
 
-        # ──────────────────────────────────────────
-        # B.   collect fragments on the bottom
-        # ──────────────────────────────────────────
-        fragment_removed = False
+            # 3. fill everything above with EMPTY (again, skipping holes)
+            while r >= 0:
+                if self._is_valid_coord(r, c) and self.content[r, c] != self.EMPTY:
+                    self.content[r, c] = self.EMPTY
+                    moved = True
+                r -= 1
+
+        # 4. collect fragments on the real bottom of each playable segment
         for c in range(self.cols):
-            # locate the lowest playable square in this column
             for r in range(self.rows - 1, -1, -1):
                 if self._is_valid_coord(r, c):
                     if self.content[r, c] == self.FRAGMENT:
                         self.content[r, c] = self.EMPTY
                         self.fragments_on_board -= 1
-                        fragment_removed = moved = True
-                    break                                   # only the lowest cell matters
-
-        # if removing a fragment created gaps, do one extra gravity pass (iteration, not recursion)
-        if fragment_removed:
-            for c in range(self.cols):
-                write = None
-                for r in range(self.rows - 1, -1, -1):
-                    if not self._is_valid_coord(r, c):
-                        continue
-                    if self.content[r, c] == self.EMPTY:
-                        if write is None:
-                            write = r
-                    else:
-                        if write is not None:
-                            self.content[write, c] = self.content[r, c]
-                            self.content[r, c] = self.EMPTY
-                            moved = True
-                            write -= 1
+                        moved = True
+                    break
 
         return moved
 
@@ -579,32 +477,31 @@ class SevenWondersSimulator:
     # helper: reshuffle when stuck (gems+bonuses only)
     # ---------------------------------------------------------------------
     def _shuffle_board(self):
-        """Shuffle movable tiles until at least one valid swap exists and no matches are present."""
-        movable = []
-        for r in range(self.rows):
-            for c in range(self.cols):
-                if not self._is_valid_coord(r, c):
-                    continue
-                t = self.content[r, c]
-                if t != self.EMPTY and t != self.FRAGMENT:
-                    movable.append(t)
-
-        if not movable:  # pathological case
+        """Shuffle tiles until at least one swap exists and no matches remain."""
+        movable = [self.content[r,c] for r in range(self.rows)
+                            for c in range(self.cols)
+                            if self._is_valid_coord(r,c)
+                            and self.content[r,c] not in (self.EMPTY, self.FRAGMENT)]
+        if not movable:
             return False
 
-        random.shuffle(movable)
-        idx = 0
-        for r in range(self.rows):
-            for c in range(self.cols):
-                if not self._is_valid_coord(r, c):
-                    continue
-                t = self.content[r, c]
-                if t != self.EMPTY and t != self.FRAGMENT:
-                    self.content[r, c] = movable[idx]
-                    idx += 1
+        # keep trying permutations
+        for _ in range(10_000):               # cap attempts to avoid infinite loop
+            random.shuffle(movable)
+            idx = 0
+            for r in range(self.rows):
+                for c in range(self.cols):
+                    if self._is_valid_coord(r,c) and \
+                    self.content[r,c] not in (self.EMPTY, self.FRAGMENT):
+                        self.content[r,c] = movable[idx]
+                        idx += 1
 
-        if self.get_valid_swaps():
-            return True
+            # check both conditions
+            if self.get_valid_swaps():
+                return True
+
+        return False   # give up after too many tries
+
           
 
     # ---------------------------------------------------------------------
