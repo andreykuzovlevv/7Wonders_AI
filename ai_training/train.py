@@ -6,8 +6,7 @@ from .dqn_agent import DQNAgent
 from tqdm import trange
 import config
 
-LEVELS = [config.LEVEL_1, config.LEVEL_2, config.LEVEL_3,
-          config.LEVEL_4, config.LEVEL_5, config.LEVEL_6]
+LEVELS = [config.LEVEL_1]
 
 env   = SevenWondersSimulator(level=LEVELS[0])   # dummy init – will reset each ep
 agent = DQNAgent()

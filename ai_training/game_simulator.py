@@ -274,11 +274,11 @@ class SevenWondersSimulator:
 
             cluster_reward = 2 * cluster_size
             if cluster_size >= 6:
-                cluster_reward += 30
+                cluster_reward += 3
             elif cluster_size == 5:
-                cluster_reward += 20
+                cluster_reward += 2
             elif cluster_size == 4:
-                cluster_reward += 10
+                cluster_reward += 1
             total_reward += cluster_reward
 
             # 4‑match → BONUS_0, 5+ → BONUS_1
@@ -622,7 +622,7 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        # step_reward = -1 * self.step_count  # move cost
+        step_reward = -1
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -657,7 +657,7 @@ class SevenWondersSimulator:
                 # only queue bonuses that haven't fired yet
                 bonuses_queue.update(chained - processed_bonuses)   
 
-                # step_reward += 30  # reward per bonus trigger
+                step_reward += 1  # reward per bonus trigger
 
           
 
@@ -671,7 +671,7 @@ class SevenWondersSimulator:
                 
                 # Get match details to determine bonus placement and additional rewards
                 md = self._get_match_details(matches, swap_action)
-                # step_reward += md['total_reward']
+                step_reward += md['total_reward']
                 
                 # Place bonuses at the appropriate positions
                 for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
@@ -691,27 +691,30 @@ class SevenWondersSimulator:
             for cr, cc in cleared:
                 self.content[cr, cc] = self.EMPTY
 
-            # step_reward += len(cleared)
 
-            floor = 1.0
-            A, mid, k = 350.0, 70.0, 0.07
-            m = (A - floor) / (1 + math.exp(k * (self.step_count - mid))) + floor
+            # floor = 1.0
+            # A, mid, k = 350.0, 70.0, 0.07
+            # m = (A - floor) / (1 + math.exp(k * (self.step_count - mid))) + floor
 
             # D. break background tiles -----------------------------------
             for br, bc in bonus_breaks:
-                if self.background[br, bc] != self.BG_NONE:
+                if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    # step_reward += m
+                    step_reward += 15
+                elif self.background[br, bc] == self.BG_STONE:
+                    self.background[br, bc] = self.BG_NONE
+                    self.stones_cleared += 1
+                    step_reward += 10
 
             for br, bc in to_break:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_STONE
-                    # step_reward += m * 0.5
+                    step_reward += 5
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    # step_reward += m
+                    step_reward += 10
 
             # E. gravity + refill (handles bonus‑2 & fragment drops) -------
             
@@ -748,8 +751,8 @@ class SevenWondersSimulator:
                                 fragment_movement_reward += rows_moved
                 
                 # Add the fragment movement reward to the total score
-                self.score += fragment_movement_reward * 20
-                
+                step_reward += fragment_movement_reward * 20
+
                 if self.debug_mode and fragment_movement_reward > 0:
                     print(f"Fragment movement reward: {fragment_movement_reward}")
 
@@ -762,7 +765,7 @@ class SevenWondersSimulator:
                 if self.debug_mode:
                     print(f"No valid swaps, shuffling board")
                 if not self._shuffle_board():  # shuffle failed to produce a move
-                    return self.get_state_representation(), 0, True
+                    return self.get_state_representation(), step_reward + 100 - self.step_count, True
 
         
 
@@ -776,20 +779,20 @@ class SevenWondersSimulator:
                 print(f"Win check passed")
                 self.display()
 
-            def win_reward(step_count):
-                A = 5000
-                B = np.log(3) / 50
-                floor = 100
-                return A * np.exp(-B * step_count) + floor
+            # def win_reward(step_count):
+            #     A = 5000
+            #     B = np.log(3) / 50
+            #     floor = 100
+            #     return A * np.exp(-B * step_count) + floor
 
 
-            return self.get_state_representation(), win_reward(self.step_count), True
+            return self.get_state_representation(), step_reward + 100 - self.step_count, True
 
         # ---- 5. continue playing ----------------------------------------
-        # self.score += step_reward  # Add the step reward to the total score
+        self.score += step_reward  # Add the step reward to the total score
         if self.debug_mode:
             self.display()
-        return self.get_state_representation(), 0, False
+        return self.get_state_representation(), step_reward, False
     
     def get_global_features(self) -> np.ndarray:
         """3 floats in [0,1] – tweak as you like."""
