@@ -38,6 +38,8 @@ class DQNAgent:
         self.q_local  = QNetwork().to(config.DEVICE)
         self.q_target = QNetwork().to(config.DEVICE)
         self.opt      = torch.optim.Adam(self.q_local.parameters(), lr=config.LR)
+        self.n_step   = config.N_STEPS
+        self.n_buffer = deque(maxlen=self.n_step)
 
     # -------- act ----------------------------------------------------------
     def act(self, board, gfeat, valid_swaps, eps=0.0):
@@ -60,20 +62,37 @@ class DQNAgent:
 
     # -------- step (store) -------------------------------------------------
     def step(self, state, action, reward, next_state, done, valid_next):
-        board, gfeat   = state
-        nb, ng         = next_state
-        a_idx          = swap_to_idx(*action[0], *action[1])
+        # 1. push (s,a,r) into a short FIFO
+        self.n_buffer.append((state, action, reward))
 
-        self.memory.append((
-            board.astype(np.float16), gfeat.astype(np.float16),
-            a_idx, reward,
-            nb.astype(np.float16), ng.astype(np.float16),
-            done, [swap_to_idx(*s[0], *s[1]) for s in valid_next]
-        ))
+        # 2. if we have n elements (or episode ended), compute R₀…ₙ₋₁
+        if len(self.n_buffer) == self.n_step or done:
+            R, γ = 0.0, 1.0
+            for (_, _, r) in reversed(self.n_buffer):
+                R += γ * r
+                γ *= self.gamma
 
+            first_state, first_action, _ = self.n_buffer[0]
+
+            # 3. store as usual but with the multi-step reward **R**
+            self.memory.append((
+                first_state[0].astype(np.float16),  # board
+                first_state[1].astype(np.float16),  # gfeat
+                swap_to_idx(*first_action[0], *first_action[1]),
+                R,
+                next_state[0].astype(np.float16),
+                next_state[1].astype(np.float16),
+                done,
+                [swap_to_idx(*s[0], *s[1]) for s in valid_next]
+            ))
+
+        # 4. housekeeping
         self.t_step = (self.t_step + 1) % self.update_every
         if self.t_step == 0 and len(self.memory) >= self.batch_size:
             self.learn(random.sample(self.memory, self.batch_size))
+
+        if done:
+            self.n_buffer.clear()     # reset at episode end
 
     # -------- learn --------------------------------------------------------
     def learn(self, batch):

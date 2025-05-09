@@ -32,12 +32,13 @@ MAP_BG = {c: i for i, c in enumerate(BACKGROUND_CLASSES)}
 
 # DQN Hyperparameters
 SEED = 42             # Random seed for reproducibility
-LR = 5e-4             # Learning rate
-BUFFER_SIZE = int(1e5) # Replay buffer size
-BATCH_SIZE = 64        # Minibatch size
-GAMMA = 0.99           # Discount factor
-TAU = 1e-3             # For soft update of target parameters
-UPDATE_EVERY = 8       # How often to update the network
+LR            = 1e-4            # Learning rate
+BUFFER_SIZE   = int(3e5)  # Replay buffer size
+BATCH_SIZE    = 256       # Minibatch size
+GAMMA         = 0.999           # Discount factor
+TAU           = 5e-3           # For soft update of target parameters
+UPDATE_EVERY  = 4         # ↑ 2× the old replay frequency
+N_STEPS       = 10        # How often to update the network
 NUM_GLOBAL_FEATURES = 3 # e.g., stone_norm, shield_norm, fragment_flag
 ACTION_DIM = 4         # r1, c1, r2, c2
 MAX_ACTIONS = GRID_ROWS * GRID_COLS * 4   
