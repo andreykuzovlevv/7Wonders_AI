@@ -657,7 +657,7 @@ class SevenWondersSimulator:
                 # only queue bonuses that haven't fired yet
                 bonuses_queue.update(chained - processed_bonuses)   
 
-                step_reward += 1  # reward per bonus trigger
+                # step_reward += 1  # reward per bonus trigger
 
           
 
@@ -671,7 +671,7 @@ class SevenWondersSimulator:
                 
                 # Get match details to determine bonus placement and additional rewards
                 md = self._get_match_details(matches, swap_action)
-                step_reward += md['total_reward']
+                # step_reward += md['total_reward']
                 
                 # Place bonuses at the appropriate positions
                 for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
