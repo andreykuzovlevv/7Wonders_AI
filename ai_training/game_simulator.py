@@ -272,7 +272,7 @@ class SevenWondersSimulator:
             cluster_size = len(cluster)
             colour       = self.content[next(iter(cluster))]
 
-            cluster_reward = 2 * cluster_size
+            cluster_reward = 0
             if cluster_size >= 6:
                 cluster_reward += 3
             elif cluster_size == 5:
@@ -622,7 +622,7 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        step_reward = -1
+        step_reward = -15
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -657,7 +657,7 @@ class SevenWondersSimulator:
                 # only queue bonuses that haven't fired yet
                 bonuses_queue.update(chained - processed_bonuses)   
 
-                # step_reward += 1  # reward per bonus trigger
+                step_reward += 2  # reward per bonus trigger
 
           
 
@@ -671,7 +671,7 @@ class SevenWondersSimulator:
                 
                 # Get match details to determine bonus placement and additional rewards
                 md = self._get_match_details(matches, swap_action)
-                # step_reward += md['total_reward']
+                step_reward += md['total_reward']
                 
                 # Place bonuses at the appropriate positions
                 for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
@@ -779,14 +779,13 @@ class SevenWondersSimulator:
                 print(f"Win check passed")
                 self.display()
 
-            # def win_reward(step_count):
-            #     A = 5000
-            #     B = np.log(3) / 50
-            #     floor = 100
-            #     return A * np.exp(-B * step_count) + floor
+            def win_reward(step_count):
+                A = 10000
+                B = np.log(3) / 50
+                return A * np.exp(-B * step_count)
 
 
-            return self.get_state_representation(), step_reward + 100 - self.step_count, True
+            return self.get_state_representation(), step_reward + win_reward(self.step_count) - self.step_count, True
 
         # ---- 5. continue playing ----------------------------------------
         self.score += step_reward  # Add the step reward to the total score

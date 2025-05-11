@@ -117,12 +117,12 @@ class DQNAgent:
 
             self.memory.append(
                 (
-                    first_state[0].astype(np.float16),  # board
-                    first_state[1].astype(np.float16),  # global features
+                    first_state[0].astype(np.float32),  # board
+                    first_state[1].astype(np.float32),  # global features
                     swap_to_idx(*first_action[0], *first_action[1]),
                     R,
-                    next_state[0].astype(np.float16),   # board n‑steps ahead
-                    next_state[1].astype(np.float16),   # global features n‑steps ahead
+                    next_state[0].astype(np.float32),   # board n‑steps ahead
+                    next_state[1].astype(np.float32),   # global features n‑steps ahead
                     done,
                     [swap_to_idx(*s[0], *s[1]) for s in valid_next],
                     effective_n,
