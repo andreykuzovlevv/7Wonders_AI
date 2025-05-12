@@ -1,59 +1,109 @@
-# --- train.py --------------------------------------------------------------
-import random, numpy as np, torch
+# train.py
+import torch
+import numpy as np
+import time
 from collections import deque
+import os
+
+import config # Your config file
+from .ppo_agent import PPOAgent 
 from .game_simulator import SevenWondersSimulator
-from .dqn_agent import DQNAgent
-from tqdm import trange
-import config
 
-LEVELS = [config.LEVEL_1]
+def main():
+    # --- Initialization ---
+    env = SevenWondersSimulator(level=config.LEVEL_1) # Adjust level
+    
+    device = config.DEVICE
+    print(f"Using device: {device}")
 
-env   = SevenWondersSimulator(level=LEVELS[0])   # dummy init – will reset each ep
-agent = DQNAgent()
+    agent = PPOAgent(env_rows=config.GRID_ROWS, env_cols=config.GRID_COLS, device=device)
+    
+    # Create a directory for saving models if it doesn't exist
+    model_save_dir = "ppo_models"
+    os.makedirs(model_save_dir, exist_ok=True)
 
-def train(n_episodes=1000, max_t=400,
-          eps_start=1.0, eps_end=0.05, eps_decay=0.997):
+    # --- Training Loop ---
+    print(f"Starting training for {config.TOTAL_TRAINING_TIMESTEPS} timesteps...")
+    start_time = time.time()
+    
+    state_tuple = env.reset()
+    board_state_np, global_features_np = state_tuple[0], state_tuple[1]
 
-    scores, scores_window = [], deque(maxlen=100)
-    eps = eps_start
+    episode_rewards = deque(maxlen=100) # For logging average reward
+    episode_lengths = deque(maxlen=100) # For logging average episode length
+    current_episode_reward = 0
+    current_episode_length = 0
+    num_episodes = 0
 
-    pbar = trange(1, n_episodes + 1, desc="Episodes")
-    for i_ep in pbar:
-        # pick level (simple curriculum: cycle 1‑5)
-        level_id = (i_ep - 1) % len(LEVELS)
-        env = SevenWondersSimulator(level=LEVELS[level_id])
+    for timestep in range(1, config.TOTAL_TRAINING_TIMESTEPS + 1):
+        # --- Collect Rollout ---
+        # In PPO, we collect N_ROLLOUT_STEPS before updating.
+        # This inner loop collects one step at a time.
+        
+        valid_swaps = env.get_valid_swaps()
 
-        state = env.get_state_tuple()
-        score = 0
-        for t in range(max_t):
-            valid_swaps = env.get_valid_swaps()
-            action = agent.act(*state, valid_swaps, eps)
-            if action is None: break
-            next_board, reward, done = env.step(action)
-            next_state = env.get_state_tuple()
-            valid_next = env.get_valid_swaps()
-            agent.step(state, action, reward, next_state, done, valid_next)
+        # Action selection
+        action_swap_obj, action_idx, log_prob, value = agent.select_action(
+            board_state_np, global_features_np, valid_swaps
+        )
 
-            state, score = next_state, score + reward
-            if done: break
+        # Environment step
+        next_state_tuple, reward, done = env.step(action_swap_obj)
+        next_board_state_np, next_global_features_np = next_state_tuple[0], next_state_tuple[1]
+        
+        current_episode_reward += reward
+        current_episode_length += 1
 
-        scores_window.append(score)
-        scores.append(score)
-        eps = max(eps_end, eps_decay * eps)
-        pbar.set_postfix({
-            "lvl":  level_id + 1,
-            "steps": t + 1,
-            "score": f"{score:.0f}",
-            "avg(100)": f"{np.mean(scores_window):.1f}",
-            "ε": f"{eps:.3f}"
-        })
+        # Store transition
+        # For the last step of a rollout, we need V(s_{t+1}) for GAE.
+        # We are collecting N_ROLLOUT_STEPS. The "next_value" is for the state *after* the N_ROLLOUT_STEPS'th action.
+        agent.store_transition(board_state_np, global_features_np, action_idx, log_prob, reward, value, done)
+        
+        board_state_np, global_features_np = next_board_state_np, next_global_features_np
 
-        if i_ep % 200 == 0:
-            torch.save(agent.q_local.state_dict(), f"q_local_ep{i_ep}.pth")
 
-    torch.save(agent.q_local.state_dict(), 'q_local_final.pth')
-    print("Training complete!")
-    return scores
+        # --- Episode End or Rollout Full ---
+        if done or current_episode_length >= config.MAX_MOVES_PER_EPISODE or len(agent.memory["actions"]) == config.N_ROLLOUT_STEPS:
+            last_value = torch.tensor(0.0, device=device) # Scalar tensor for terminal state
+            if not done and len(agent.memory["actions"]) == config.N_ROLLOUT_STEPS : # Rollout full, but episode not over
+                next_board_state_tensor = torch.from_numpy(next_board_state_np).float().unsqueeze(0).to(device)
+                next_global_features_tensor = torch.from_numpy(next_global_features_np).float().unsqueeze(0).to(device)
+                with torch.no_grad():
+                    # agent.model.forward returns (logits, state_value_raw)
+                    # state_value_raw is (1, 1) for batch size 1 input
+                    _, last_value_raw = agent.model(next_board_state_tensor, next_global_features_tensor)
+                    last_value = last_value_raw.squeeze() # Squeeze (1,1) to scalar ()
+            
+            if len(agent.memory["actions"]) >= config.N_ROLLOUT_STEPS or done:
+                 agent.learn(last_value) # Pass the scalar tensor last_value
+
+        if done or current_episode_length >= config.MAX_MOVES_PER_EPISODE:
+            episode_rewards.append(current_episode_reward)
+            episode_lengths.append(current_episode_length)
+            num_episodes += 1
+            
+            # Reset environment
+            state_tuple = env.reset()
+            board_state_np, global_features_np = state_tuple[0], state_tuple[1]
+            current_episode_reward = 0
+            current_episode_length = 0
+
+        # --- Logging and Saving ---
+        if timestep % config.LOG_FREQ == 0:
+            avg_reward = np.mean(episode_rewards) if episode_rewards else float('nan')
+            avg_length = np.mean(episode_lengths) if episode_lengths else float('nan')
+            elapsed_time = time.time() - start_time
+            print(f"Timestep: {timestep}/{config.TOTAL_TRAINING_TIMESTEPS} | Episodes: {num_episodes}")
+            print(f"Avg Reward (last 100): {avg_reward:.2f} | Avg Length (last 100): {avg_length:.2f}")
+            print(f"Time: {elapsed_time:.2f}s | FPS: {timestep / elapsed_time:.2f}")
+            print("-" * 40)
+
+        if timestep % config.SAVE_MODEL_FREQ == 0:
+            agent.save_model(os.path.join(model_save_dir, f"ppo_7wonders_ts{timestep}.pth"))
+
+    # Final save
+    agent.save_model(os.path.join(model_save_dir, f"ppo_7wonders_final.pth"))
+    print("Training finished.")
 
 if __name__ == "__main__":
-    train()
+    main()

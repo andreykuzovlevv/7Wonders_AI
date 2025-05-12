@@ -80,7 +80,7 @@ class SevenWondersSimulator:
         # --- Board Initialization ---
         self._init_from_level(self.level)
 
-        return self.get_state_representation()
+        return self.get_state_tuple()
 
     def _init_from_level(self, level_dict):
         self.mask = np.ones((self.rows, self.cols), dtype=bool)
@@ -785,13 +785,13 @@ class SevenWondersSimulator:
                 return A * np.exp(-B * step_count)
 
 
-            return self.get_state_representation(), step_reward + win_reward(self.step_count) - self.step_count, True
+            return self.get_state_tuple(), step_reward + win_reward(self.step_count) - self.step_count, True
 
         # ---- 5. continue playing ----------------------------------------
         self.score += step_reward  # Add the step reward to the total score
         if self.debug_mode:
             self.display()
-        return self.get_state_representation(), step_reward, False
+        return self.get_state_tuple(), step_reward, False
     
     def get_global_features(self) -> np.ndarray:
         """3 floats in [0,1] – tweak as you like."""
