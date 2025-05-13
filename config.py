@@ -75,13 +75,13 @@ ACTION_DIM = 4         # r1, c1, r2, c2
 MAX_ACTIONS = GRID_ROWS * GRID_COLS * 4   
 
 # --- PPO Hyperparameters ---
-LEARNING_RATE = 3e-4       # Adam optimizer learning rate
+LEARNING_RATE = 3e-5       # Adam optimizer learning rate
 GAMMA = 0.99               # Discount factor for future rewards
 GAE_LAMBDA = 0.95          # Lambda for Generalized Advantage Estimation
 CLIP_EPSILON = 0.2         # PPO clipping parameter for surrogate loss
 N_EPOCHS_PPO = 10          # Number of epochs to train on a batch of data in PPO
 MINIBATCH_SIZE_PPO = 64    # Mini-batch size for PPO updates
-ENTROPY_COEFF = 0.01       # Coefficient for entropy bonus (encourages exploration)
+ENTROPY_COEFF = 0.02      # Coefficient for entropy bonus (encourages exploration)
 VALUE_LOSS_COEFF = 0.5     # Coefficient for value function loss
 
 # --- Training Loop Configuration ---

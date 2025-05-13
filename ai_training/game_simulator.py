@@ -622,7 +622,7 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        step_reward = -15
+        step_reward = -9
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -797,7 +797,7 @@ class SevenWondersSimulator:
         """3 floats in [0,1] – tweak as you like."""
         stones_ratio = self.stones_cleared / max(1, self.initial_stones)
         fragments = self.fragments_on_board 
-        step_count = self.step_count / 400
+        step_count = self.step_count
         return np.array([stones_ratio, fragments, step_count], dtype=np.float32)
 
     # convenience – one call returns everything the agent stores

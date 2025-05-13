@@ -42,6 +42,9 @@ def main():
         
         valid_swaps = env.get_valid_swaps()
 
+        if len(valid_swaps) == 0:
+            raise Exception("No valid swaps found. Skipping this step.")
+
         # Action selection
         action_swap_obj, action_idx, log_prob, value = agent.select_action(
             board_state_np, global_features_np, valid_swaps

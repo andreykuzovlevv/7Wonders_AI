@@ -26,7 +26,7 @@ class SevenWondersGUI:
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         pygame.display.set_caption("7 Wonders")
         self.clock = pygame.time.Clock()
-        self.game = SevenWondersSimulator(level=config.LEVEL_6)
+        self.game = SevenWondersSimulator(level=config.LEVEL_1)
         self.selected_tile = None
         self.load_assets()
         self.valid_moves = []  # Store valid moves
