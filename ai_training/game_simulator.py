@@ -606,7 +606,7 @@ class SevenWondersSimulator:
         if not (self._is_valid_coord(r1, c1) and self._is_valid_coord(r2, c2)):
             if self.debug_mode:
                 self.display()
-            return self.get_state_representation(), -100, True
+            return self.get_state_tuple(), -100, True, []
 
         if any(
             self.content[r, c] in (self.FRAGMENT, self.EMPTY)
@@ -614,7 +614,7 @@ class SevenWondersSimulator:
         ):
             if self.debug_mode:
                 self.display()
-            return self.get_state_representation(), -100, True
+            return self.get_state_tuple(), -100, True, []
 
         # ---- 1. perform swap (background never moves) --------------------
         self.content[r1, c1], self.content[r2, c2] = (
@@ -761,11 +761,12 @@ class SevenWondersSimulator:
                 print(f"Refilled board")
 
             # ---- 3. SHUFFLE IF STUCK ----------------------------------------
-            if not self.get_valid_swaps():
+            valid_swaps = self.get_valid_swaps()
+            if not valid_swaps:
                 if self.debug_mode:
                     print(f"No valid swaps, shuffling board")
                 if not self._shuffle_board():  # shuffle failed to produce a move
-                    return self.get_state_representation(), step_reward + 100 - self.step_count, True
+                    return self.get_state_tuple(), step_reward + 100 - self.step_count, True, valid_swaps
 
         
 
@@ -785,13 +786,13 @@ class SevenWondersSimulator:
                 return A * np.exp(-B * step_count)
 
 
-            return self.get_state_tuple(), step_reward + win_reward(self.step_count) - self.step_count, True
+            return self.get_state_tuple(), step_reward + win_reward(self.step_count) - self.step_count, True, valid_swaps
 
         # ---- 5. continue playing ----------------------------------------
         self.score += step_reward  # Add the step reward to the total score
         if self.debug_mode:
             self.display()
-        return self.get_state_tuple(), step_reward, False
+        return self.get_state_tuple(), step_reward, False, valid_swaps
     
     def get_global_features(self) -> np.ndarray:
         """3 floats in [0,1] – tweak as you like."""

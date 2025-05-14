@@ -36,6 +36,9 @@ from torch.distributions.categorical import Categorical
 
 from torch.utils.tensorboard import SummaryWriter
 import imageio.v3 as iio
+import cProfile
+import pstats
+from pstats import SortKey
 
 # -----------------------------------------------------------------------------
 # -- environment wrapper --
@@ -113,11 +116,11 @@ class SevenWondersEnv(gym.Env):
 
     def step(self, action: int):
         swap = self._decode_action(action)
-        state_tuple, reward, done = self.sim.step(swap)  # simulator returns (state_tuple, reward, done)
+        state_tuple, reward, done, valid_swaps = self.sim.step(swap)  # simulator returns (state_tuple, reward, done)
         obs_planes, obs_globals = state_tuple  # unpack the state tuple
         terminated = done
         truncated = self.sim.step_count >= 400
-        info = {"action_mask": self._get_action_mask()}
+        info = {"action_mask": self._get_action_mask(valid_swaps)}
         obs = {"board": obs_planes, "globals": obs_globals}
         return obs, reward, terminated, truncated, info
 
@@ -126,9 +129,9 @@ class SevenWondersEnv(gym.Env):
         planes, globs = self.sim.get_state_tuple()
         return {"board": planes, "globals": globs}
 
-    def _get_action_mask(self):
+    def _get_action_mask(self, valid_swaps):
         mask = np.zeros(self.n_actions, dtype=bool)
-        for swap in self.sim.get_valid_swaps():
+        for swap in valid_swaps:
             idx = self._encode_action(swap)
             mask[idx] = True
         return mask
@@ -146,10 +149,9 @@ class ActorCritic(nn.Module):
     def __init__(self, rows: int, cols: int, n_actions: int):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(17, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, padding=1),
-            nn.ReLU(),
+            nn.Conv2d(17, 128, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(128,128,3,padding=1),   nn.ReLU(),
+            nn.Conv2d(128,128,3,padding=1),   nn.ReLU(),
             nn.Flatten(),
         )
         conv_out_dim = 64 * rows * cols
@@ -190,7 +192,7 @@ class Trajectory:
 
 class PPOAgent:
     def __init__(self, env: gym.Env, gamma: float = 0.99, lam: float = 0.95, clip_eps: float = 0.2,
-                 lr: float = 2.5e-4, batch_size: int = 512, minibatch: int = 64, epochs: int = 4, device: str = "cuda"):
+                 lr: float = 3e-4, batch_size: int = 512, minibatch: int = 256, epochs: int = 4, device: str = "cuda"):
         self.env = env
         self.gamma, self.lam, self.clip_eps = gamma, lam, clip_eps
         self.batch_size, self.minibatch, self.epochs = batch_size, minibatch, epochs
@@ -200,7 +202,7 @@ class PPOAgent:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
         self.tb = SummaryWriter(log_dir="ai_training/runs/7wonders_ppo")
-        self.global_step = 0
+        self.step = 0
 
 
     # --- rollout collection -------------------------------------------------------------
@@ -216,6 +218,10 @@ class PPOAgent:
             board = torch.from_numpy(obs["board"]).unsqueeze(0).to(self.device)
             globs = torch.from_numpy(obs["globals"]).unsqueeze(0).to(self.device)
             mask = torch.from_numpy(info["action_mask"]).unsqueeze(0).to(self.device)
+
+            mask_true = info["action_mask"].sum()
+            self.tb.add_scalar("train/mask_true", mask_true, self.step)
+
 
             with torch.no_grad():
                 logits, value = self.model(board, globs)
@@ -276,6 +282,9 @@ class PPOAgent:
         adv, returns = self._gae(traj.rewards, traj.dones, traj.values.squeeze(-1), traj.next_value, self.gamma, self.lam)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
+        total_policy_loss, total_value_loss, total_entropy = 0.0, 0.0, 0.0
+        n_minibatches = 0
+
         # flatten
         boards = traj.boards.to(self.device)
         globals_ = traj.globals.to(self.device)
@@ -301,8 +310,13 @@ class PPOAgent:
                 surr2 = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * adv[mb_idx]
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                value_loss = F.mse_loss(value.squeeze(-1), returns[mb_idx])
+                value_loss = F.mse_loss(value, returns[mb_idx])
                 entropy = dist.entropy().mean()
+
+                total_policy_loss += policy_loss.item()
+                total_value_loss += value_loss.item()
+                total_entropy += entropy.item()
+                n_minibatches += 1
 
                 loss = policy_loss + 0.5 * value_loss - 0.01 * entropy
 
@@ -310,6 +324,13 @@ class PPOAgent:
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
                 self.optimizer.step()
+
+        return {
+            "policy_loss": total_policy_loss / n_minibatches,
+            "value_loss": total_value_loss / n_minibatches,
+            "entropy": total_entropy / n_minibatches,
+            "adv": adv,
+        }
 
     def play_episode(self, render=False):
         obs, info = self.env.reset()
@@ -338,30 +359,43 @@ class PPOAgent:
     # --- top-level training loop --------------------------------------------------------
     def train(self, total_steps: int = 1_000_000, log_every: int = 10_000, save_path: str | None = None):
         print("Device: ", self.device)
-        step = 0
+        
         t0 = time.time()
-        while step < total_steps:
+        while self.step < total_steps:
             traj, traj_steps = self.collect()
-            self.update(traj)
-            step += traj_steps
+            stats = self.update(traj)
+            self.step += traj_steps
+            print(f"Step: {self.step}, Traj steps: {traj_steps}")
           
-            fps = step / (time.time() - t0)
+            fps = self.step / (time.time() - t0)
             avg_r = traj.rewards.sum().item() / traj_steps
 
-            # eval_moves, eval_win, frames = self.play_episode()
-            # TensorBoard scalars
-            self.tb.add_scalar("train/avg_return", avg_r, step)
-            self.tb.add_scalar("train/episode_len", traj_steps/traj.dones.sum().item(), step)
-            self.tb.add_scalar("train/fps", fps, step)
-            self.tb.add_scalar("train/episodes_in_batch", traj.dones.sum().item(), step)
-            # self.tb.add_scalar("eval/moves", eval_moves, step)
-            # self.tb.add_scalar("eval/win",   eval_win,   step)
+
+            # Reward stats
+            self.tb.add_scalar("train/avg_reward_per_step", avg_r, self.step)
+            self.tb.add_scalar("train/reward_mean", traj.rewards.mean().item(), self.step)
+            self.tb.add_scalar("train/reward_std", traj.rewards.std().item(), self.step)
+
+            # Episode stats
+            self.tb.add_scalar("train/episode_avg_len", traj_steps/traj.dones.sum().item(), self.step)
+            self.tb.add_scalar("train/fps", fps, self.step)
+            self.tb.add_scalar("train/episodes_in_batch", traj.dones.sum().item(), self.step)
+
+            # Loss stats
+            self.tb.add_scalar("train/policy_loss", stats["policy_loss"], self.step)
+            self.tb.add_scalar("train/value_loss", stats["value_loss"], self.step)
+            self.tb.add_scalar("train/entropy", stats["entropy"], self.step)
+
+            # Adv stats
+            self.tb.add_scalar("train/adv_mean", stats["adv"].mean().item(), self.step)
+            self.tb.add_scalar("train/adv_std", stats["adv"].std().item(), self.step)
+
             
             # # GIF every 100 k steps
-            # if step // 100_000 > (step-self.batch_size)//100_000 and frames:
-            #     iio.imwrite(f"ai_training/runs/vid_{step//1000:06d}.gif", frames, duration=0.08)
+            # if self.step // 100_000 > (self.step-self.batch_size)//100_000 and frames:
+            #     iio.imwrite(f"ai_training/runs/vid_{self.step//1000:06d}.gif", frames, duration=0.08)
 
-            if step // 100_000 > (step - len(traj.actions)) // 100_000:
+            if self.step // 100_000 > (self.step - len(traj.actions)) // 100_000:
                 torch.save(self.model.state_dict(), save_path)
         print("Training complete")
 
@@ -374,11 +408,28 @@ def train():
     parser = argparse.ArgumentParser(description="Train PPO on 7 Wonders match-3")
     parser.add_argument("--total_steps", type=int, default=2_000_000)
     parser.add_argument("--save", type=Path, default=Path("ai_training/runs/ppo_7wonders.pt"))
+    parser.add_argument("--profile", action="store_true", help="Enable profiling")
     args = parser.parse_args()
 
     env = SevenWondersEnv()
     agent = PPOAgent(env)
-    agent.train(total_steps=args.total_steps, save_path=str(args.save))
+    
+    if args.profile:
+        profiler = cProfile.Profile()
+        profiler.enable()
+        agent.train(total_steps=args.total_steps, save_path=str(args.save))
+        profiler.disable()
+        
+        # Save profiling results to a file
+        stats = pstats.Stats(profiler)
+        stats.sort_stats(SortKey.CUMULATIVE)
+        stats.dump_stats("ai_training/runs/ppo_profile.prof")
+        
+        # Print top 20 time-consuming functions
+        print("\nProfiling Results (Top 20):")
+        stats.print_stats(20)
+    else:
+        agent.train(total_steps=args.total_steps, save_path=str(args.save))
 
 
 if __name__ == "__main__":
