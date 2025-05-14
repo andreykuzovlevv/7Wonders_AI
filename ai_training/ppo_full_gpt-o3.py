@@ -108,21 +108,22 @@ class SevenWondersEnv(gym.Env):
     # --- gym core ---------------------------------------------------------------------------
     def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
         super().reset(seed=seed)
-        state_tuple = self.sim.reset()  # simulator returns state_tuple
+        valid_swaps = self.sim.reset()  # simulator returns state_tuple
+        state_tuple = self.sim.get_state_tuple()
         obs_planes, obs_globals = state_tuple  # unpack the state tuple
         obs = {"board": obs_planes, "globals": obs_globals}
-        info = {"action_mask": self._get_action_mask()}
+        info = {"action_mask": self._get_action_mask(valid_swaps)}
         return obs, info
-
+    
     def step(self, action: int):
         swap = self._decode_action(action)
-        state_tuple, reward, done, valid_swaps = self.sim.step(swap)  # simulator returns (state_tuple, reward, done)
+        reward, done, valid_swaps = self.sim.step(swap)  # simulator returns (state_tuple, reward, done)
+        state_tuple = self.sim.get_state_tuple()
         obs_planes, obs_globals = state_tuple  # unpack the state tuple
         terminated = done
-        truncated = self.sim.step_count >= 400
         info = {"action_mask": self._get_action_mask(valid_swaps)}
         obs = {"board": obs_planes, "globals": obs_globals}
-        return obs, reward, terminated, truncated, info
+        return obs, reward, terminated, info
 
     # --- helpers ---------------------------------------------------------------------------
     def _get_obs(self):
@@ -154,7 +155,8 @@ class ActorCritic(nn.Module):
             nn.Conv2d(128,128,3,padding=1),   nn.ReLU(),
             nn.Flatten(),
         )
-        conv_out_dim = 64 * rows * cols
+        # Calculate correct output dimension: 128 channels * rows * cols
+        conv_out_dim = 128 * rows * cols
         self.fc = nn.Linear(conv_out_dim + 3, 256)
         self.policy_head = nn.Linear(256, n_actions)
         self.value_head = nn.Linear(256, 1)
@@ -173,7 +175,15 @@ class ActorCritic(nn.Module):
 # -----------------------------------------------------------------------------
 
 def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1):
-    logits = logits.masked_fill(~mask, -1e9)
+    """Apply softmax to logits while masking out invalid actions.
+    
+    Args:
+        logits: Action logits tensor
+        mask: Boolean mask where True indicates valid actions
+        dim: Dimension to apply softmax over
+    """
+    # Set invalid actions to a large negative number
+    logits = logits.masked_fill(~mask, float('-inf'))
     return torch.softmax(logits, dim=dim)
 
 
@@ -191,8 +201,8 @@ class Trajectory:
 
 
 class PPOAgent:
-    def __init__(self, env: gym.Env, gamma: float = 0.99, lam: float = 0.95, clip_eps: float = 0.2,
-                 lr: float = 3e-4, batch_size: int = 512, minibatch: int = 256, epochs: int = 4, device: str = "cuda"):
+    def __init__(self, env: gym.Env, gamma: float = 0.99, lam: float = 0.95, clip_eps: float = 0.3,
+                 lr: float = 3e-4, batch_size: int = 512, minibatch: int = 256, epochs: int = 4):
         self.env = env
         self.gamma, self.lam, self.clip_eps = gamma, lam, clip_eps
         self.batch_size, self.minibatch, self.epochs = batch_size, minibatch, epochs
@@ -229,7 +239,7 @@ class PPOAgent:
                 dist = Categorical(probs)
                 action = dist.sample()
 
-            next_obs, reward, term, trunc, next_info = self.env.step(action.item())
+            next_obs, reward, term, next_info = self.env.step(action.item())
 
             boards_l.append(board.squeeze(0).cpu())
             globals_l.append(globs.squeeze(0).cpu())
@@ -237,12 +247,12 @@ class PPOAgent:
             masks_l.append(mask.squeeze(0).cpu())
             logp_l.append(dist.log_prob(action).cpu())
             rewards_l.append(torch.tensor(reward, dtype=torch.float32))
-            dones_l.append(torch.tensor(term or trunc, dtype=torch.float32))
+            dones_l.append(torch.tensor(term, dtype=torch.float32))
             values_l.append(value.cpu())
 
             total_steps += 1
             obs, info = next_obs, next_info
-            done = term or trunc
+            done = term
             if done:
                 obs, info = self.env.reset()
 
@@ -318,7 +328,7 @@ class PPOAgent:
                 total_entropy += entropy.item()
                 n_minibatches += 1
 
-                loss = policy_loss + 0.5 * value_loss - 0.01 * entropy
+                loss = policy_loss + 0.25 * value_loss - 0.05 * entropy
 
                 self.optimizer.zero_grad()
                 loss.backward()

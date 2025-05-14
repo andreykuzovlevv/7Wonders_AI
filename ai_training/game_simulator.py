@@ -80,7 +80,7 @@ class SevenWondersSimulator:
         # --- Board Initialization ---
         self._init_from_level(self.level)
 
-        return self.get_state_tuple()
+        return self.get_valid_swaps()
 
     def _init_from_level(self, level_dict):
         self.mask = np.ones((self.rows, self.cols), dtype=bool)
@@ -107,7 +107,12 @@ class SevenWondersSimulator:
                     self.background[r, c] = self.BG_STONE
                 else:
                     raise ValueError(f"Invalid level character: {ch}")
-        if not self.get_valid_swaps() and self._find_matches():
+        if not self.get_valid_swaps():
+            while True:
+                self._shuffle_board()          # split filler into a helper
+                if not self._find_matches():
+                    break
+        if self._find_matches():
             while True:
                 self._shuffle_board()          # split filler into a helper
                 if not self._find_matches():
@@ -274,11 +279,11 @@ class SevenWondersSimulator:
 
             cluster_reward = 0
             if cluster_size >= 6:
-                cluster_reward += 3
+                cluster_reward += 0.6
             elif cluster_size == 5:
-                cluster_reward += 2
+                cluster_reward += 0.4
             elif cluster_size == 4:
-                cluster_reward += 1
+                cluster_reward += 0.2
             total_reward += cluster_reward
 
             # 4‑match → BONUS_0, 5+ → BONUS_1
@@ -597,6 +602,7 @@ class SevenWondersSimulator:
             (next_state, reward, done)
         """
         self.step_count += 1
+        valid_swaps = []
 
         if self.debug_mode:
             print(f"Stepping with swap: {swap_action}")
@@ -604,17 +610,13 @@ class SevenWondersSimulator:
 
         # ---- 0. basic legality checks ------------------------------------
         if not (self._is_valid_coord(r1, c1) and self._is_valid_coord(r2, c2)):
-            if self.debug_mode:
-                self.display()
-            return self.get_state_tuple(), -100, True, []
+            raise ValueError("Invalid swap coordinates")
 
         if any(
             self.content[r, c] in (self.FRAGMENT, self.EMPTY)
             for r, c in ((r1, c1), (r2, c2))
         ):
-            if self.debug_mode:
-                self.display()
-            return self.get_state_tuple(), -100, True, []
+            raise ValueError("Swap coordinates contain fragments or empty spaces")
 
         # ---- 1. perform swap (background never moves) --------------------
         self.content[r1, c1], self.content[r2, c2] = (
@@ -622,7 +624,7 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        step_reward = -9
+        step_reward = -0.01 * self.step_count
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -657,7 +659,7 @@ class SevenWondersSimulator:
                 # only queue bonuses that haven't fired yet
                 bonuses_queue.update(chained - processed_bonuses)   
 
-                step_reward += 2  # reward per bonus trigger
+                step_reward += 0.1  # reward per bonus trigger
 
           
 
@@ -701,20 +703,20 @@ class SevenWondersSimulator:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 15
+                    step_reward += 0.4
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 10
+                    step_reward += 0.2
 
             for br, bc in to_break:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_STONE
-                    step_reward += 5
+                    step_reward += 0.2
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 10
+                    step_reward += 0.2
 
             # E. gravity + refill (handles bonus‑2 & fragment drops) -------
             
@@ -751,7 +753,7 @@ class SevenWondersSimulator:
                                 fragment_movement_reward += rows_moved
                 
                 # Add the fragment movement reward to the total score
-                step_reward += fragment_movement_reward * 20
+                step_reward += fragment_movement_reward * 0.6
 
                 if self.debug_mode and fragment_movement_reward > 0:
                     print(f"Fragment movement reward: {fragment_movement_reward}")
@@ -766,7 +768,8 @@ class SevenWondersSimulator:
                 if self.debug_mode:
                     print(f"No valid swaps, shuffling board")
                 if not self._shuffle_board():  # shuffle failed to produce a move
-                    return self.get_state_tuple(), step_reward + 100 - self.step_count, True, valid_swaps
+                    raise Exception("Shuffle failed to produce a move")
+                valid_swaps = self.get_valid_swaps()
 
         
 
@@ -785,14 +788,15 @@ class SevenWondersSimulator:
                 B = np.log(3) / 50
                 return A * np.exp(-B * step_count)
 
-
-            return self.get_state_tuple(), step_reward + win_reward(self.step_count) - self.step_count, True, valid_swaps
+            assert valid_swaps, "Simulator returned no legal moves"
+            return step_reward + win_reward(self.step_count) - self.step_count, True, valid_swaps
 
         # ---- 5. continue playing ----------------------------------------
         self.score += step_reward  # Add the step reward to the total score
         if self.debug_mode:
             self.display()
-        return self.get_state_tuple(), step_reward, False, valid_swaps
+        assert valid_swaps, "Simulator returned no legal moves"
+        return step_reward, False, valid_swaps
     
     def get_global_features(self) -> np.ndarray:
         """3 floats in [0,1] – tweak as you like."""
