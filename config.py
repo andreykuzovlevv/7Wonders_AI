@@ -3,6 +3,10 @@
 
 import torch
 from typing import Tuple, List, Dict
+
+Coord = Tuple[int, int]
+Swap = Tuple[Coord, Coord]
+
 GRID_ROWS = 10
 GRID_COLS = 10
 

@@ -307,7 +307,7 @@ class SevenWondersSimulator:
         }
 
 
-    def get_valid_swaps(self) -> List[Swap]:
+    def get_valid_swaps(self) -> Set[Swap]:
         """
         Return every legal swap the player can make.
 
@@ -319,7 +319,7 @@ class SevenWondersSimulator:
         immediately valid (bonuses always fire when moved).
         • Otherwise the swap must create ≥ 1 gem match.
         """
-        valid_swaps: List[Swap] = []
+        valid_swaps: Set[Swap] = set()
 
         def is_swappable(r: int, c: int) -> bool:
             """Can the tile at (r, c) take part in a swap?"""
@@ -345,12 +345,12 @@ class SevenWondersSimulator:
                     t1, t2 = self.content[r, c], self.content[r, c + 1]
 
                     if is_bonus(t1) or is_bonus(t2):
-                        valid_swaps.append(((r, c), (r, c + 1)))
+                        valid_swaps.add(((r, c), (r, c + 1)))
                     else:
                         # need to test for a resulting match
                         self._swap_cells(r, c, r, c + 1)
                         if self.swap_creates_match(r, c, r, c + 1):
-                            valid_swaps.append(((r, c), (r, c + 1)))
+                            valid_swaps.add(((r, c), (r, c + 1)))
                         # restore board
                         self._swap_cells(r, c, r, c + 1)
 
@@ -359,11 +359,11 @@ class SevenWondersSimulator:
                     t1, t2 = self.content[r, c], self.content[r + 1, c]
 
                     if is_bonus(t1) or is_bonus(t2):
-                        valid_swaps.append(((r, c), (r + 1, c)))
+                        valid_swaps.add(((r, c), (r + 1, c)))
                     else:
                         self._swap_cells(r, c, r + 1, c)
                         if self.swap_creates_match(r, c, r + 1, c):
-                            valid_swaps.append(((r, c), (r + 1, c)))
+                            valid_swaps.add(((r, c), (r + 1, c)))
                         self._swap_cells(r, c, r + 1, c)
 
         return valid_swaps
@@ -601,30 +601,25 @@ class SevenWondersSimulator:
         Execute one player swap, resolve all bonus chains + cascades, then return:
             (next_state, reward, done)
         """
-        self.step_count += 1
-        valid_swaps = []
+        valid_swaps = self.get_valid_swaps()
 
         if self.debug_mode:
             print(f"Stepping with swap: {swap_action}")
         (r1, c1), (r2, c2) = swap_action
 
         # ---- 0. basic legality checks ------------------------------------
-        if not (self._is_valid_coord(r1, c1) and self._is_valid_coord(r2, c2)):
-            raise ValueError("Invalid swap coordinates")
-
-        if any(
-            self.content[r, c] in (self.FRAGMENT, self.EMPTY)
-            for r, c in ((r1, c1), (r2, c2))
-        ):
-            raise ValueError("Swap coordinates contain fragments or empty spaces")
+        if swap_action not in valid_swaps:
+            return -5, False, valid_swaps
 
         # ---- 1. perform swap (background never moves) --------------------
+        self.step_count += 1
+
         self.content[r1, c1], self.content[r2, c2] = (
             self.content[r2, c2],
             self.content[r1, c1],
         )
 
-        step_reward = -0.01 * self.step_count
+        step_reward = -1
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -659,7 +654,7 @@ class SevenWondersSimulator:
                 # only queue bonuses that haven't fired yet
                 bonuses_queue.update(chained - processed_bonuses)   
 
-                step_reward += 0.1  # reward per bonus trigger
+                step_reward += 1  # reward per bonus trigger
 
           
 
@@ -673,7 +668,7 @@ class SevenWondersSimulator:
                 
                 # Get match details to determine bonus placement and additional rewards
                 md = self._get_match_details(matches, swap_action)
-                step_reward += md['total_reward']
+                # step_reward += md['total_reward']
                 
                 # Place bonuses at the appropriate positions
                 for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
@@ -693,6 +688,8 @@ class SevenWondersSimulator:
             for cr, cc in cleared:
                 self.content[cr, cc] = self.EMPTY
 
+            step_reward += len(cleared) * 0.1
+
 
             # floor = 1.0
             # A, mid, k = 350.0, 70.0, 0.07
@@ -703,20 +700,20 @@ class SevenWondersSimulator:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 0.4
+                    step_reward += 2
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 0.2
+                    step_reward += 1
 
             for br, bc in to_break:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_STONE
-                    step_reward += 0.2
+                    step_reward += 1
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 0.2
+                    step_reward += 1
 
             # E. gravity + refill (handles bonus‑2 & fragment drops) -------
             
@@ -753,7 +750,7 @@ class SevenWondersSimulator:
                                 fragment_movement_reward += rows_moved
                 
                 # Add the fragment movement reward to the total score
-                step_reward += fragment_movement_reward * 0.6
+                step_reward += fragment_movement_reward * 3
 
                 if self.debug_mode and fragment_movement_reward > 0:
                     print(f"Fragment movement reward: {fragment_movement_reward}")
@@ -762,14 +759,14 @@ class SevenWondersSimulator:
             if self.debug_mode:
                 print(f"Refilled board")
 
-            # ---- 3. SHUFFLE IF STUCK ----------------------------------------
+        # ---- 3. SHUFFLE IF STUCK ----------------------------------------
+        valid_swaps = self.get_valid_swaps()
+        if not valid_swaps:
+            if self.debug_mode:
+                print(f"No valid swaps, shuffling board")
+            if not self._shuffle_board():  # shuffle failed to produce a move
+                raise Exception("Shuffle failed to produce a move")
             valid_swaps = self.get_valid_swaps()
-            if not valid_swaps:
-                if self.debug_mode:
-                    print(f"No valid swaps, shuffling board")
-                if not self._shuffle_board():  # shuffle failed to produce a move
-                    raise Exception("Shuffle failed to produce a move")
-                valid_swaps = self.get_valid_swaps()
 
         
 
@@ -787,14 +784,17 @@ class SevenWondersSimulator:
                 A = 10000
                 B = np.log(3) / 50
                 return A * np.exp(-B * step_count)
+            
 
             assert valid_swaps, "Simulator returned no legal moves"
-            return step_reward + win_reward(self.step_count) - self.step_count, True, valid_swaps
+            return step_reward, True, valid_swaps
 
         # ---- 5. continue playing ----------------------------------------
         self.score += step_reward  # Add the step reward to the total score
         if self.debug_mode:
             self.display()
+            
+       
         assert valid_swaps, "Simulator returned no legal moves"
         return step_reward, False, valid_swaps
     

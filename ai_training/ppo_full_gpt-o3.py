@@ -47,99 +47,7 @@ from pstats import SortKey
 Swap = Tuple[Tuple[int, int], Tuple[int, int]]  # ((r1,c1),(r2,c2))
 
 
-class SevenWondersEnv(gym.Env):
-    """A lightweight Gym wrapper exposing the simulator to RL algorithms.
 
-    Action encoding: we give the agent a *fixed* discrete action space of
-    size `rows*cols*4` (swap UP, DOWN, LEFT, RIGHT for every cell).  Before
-    sampling an action we mask‐out illegal swaps so the policy never selects
-    them.  Invalid-action penalties inside the simulator therefore become an
-    additional safety net rather than the primary guard rail.
-    """
-
-    metadata = {"render_modes": [None]}
-
-    def __init__(self, rows=config.GRID_ROWS, cols=config.GRID_COLS, level=config.LEVEL_1, seed=config.SEED):
-
-        super().__init__()
-        self.sim = SevenWondersSimulator(level=level)
-        self.rows, self.cols = rows, cols
-        # --- generate unique swaps (right + down only) ---
-        self.swap_list = []
-        for r in range(rows):
-            for c in range(cols):
-                if c + 1 < cols:
-                    self.swap_list.append(((r, c), (r, c + 1)))
-                if r + 1 < rows:
-                    self.swap_list.append(((r, c), (r + 1, c)))
-
-        self.n_actions = len(self.swap_list)
-        self.action_space = gym.spaces.Discrete(self.n_actions)
-
-        # (17, rows, cols) board tensor  +  (3,) global features  →  Dict space
-        board_low = np.zeros((17, rows, cols), dtype=np.float32)
-        board_high = np.ones_like(board_low)
-        globals_low = np.zeros(3, dtype=np.float32)
-        globals_high = np.ones(3, dtype=np.float32)
-        self.observation_space = gym.spaces.Dict(
-            {
-                "board": gym.spaces.Box(board_low, board_high, dtype=np.float32),
-                "globals": gym.spaces.Box(globals_low, globals_high, dtype=np.float32),
-            }
-        )
-
-        self._rng = np.random.default_rng(seed)
-        self.reset(seed=seed)
-
-    # --- utility: action index  ↔  Swap tuple ---------------------------------------------------
-    def _decode_action(self, action: int) -> Swap:
-        """
-        Given an integer action index, return the corresponding Swap tuple from swap_list.
-        """
-        return self.swap_list[action]
-
-    def _encode_action(self, swap: Swap) -> int:
-        """
-        Given a Swap tuple, return its index in swap_list.
-        Raises ValueError if the swap is not in the list.
-        """
-        return self.swap_list.index(swap)
-
-    # --- gym core ---------------------------------------------------------------------------
-    def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
-        super().reset(seed=seed)
-        valid_swaps = self.sim.reset()  # simulator returns state_tuple
-        state_tuple = self.sim.get_state_tuple()
-        obs_planes, obs_globals = state_tuple  # unpack the state tuple
-        obs = {"board": obs_planes, "globals": obs_globals}
-        info = {"action_mask": self._get_action_mask(valid_swaps)}
-        return obs, info
-    
-    def step(self, action: int):
-        swap = self._decode_action(action)
-        reward, done, valid_swaps = self.sim.step(swap)  # simulator returns (state_tuple, reward, done)
-        state_tuple = self.sim.get_state_tuple()
-        obs_planes, obs_globals = state_tuple  # unpack the state tuple
-        terminated = done
-        info = {"action_mask": self._get_action_mask(valid_swaps)}
-        obs = {"board": obs_planes, "globals": obs_globals}
-        return obs, reward, terminated, info
-
-    # --- helpers ---------------------------------------------------------------------------
-    def _get_obs(self):
-        planes, globs = self.sim.get_state_tuple()
-        return {"board": planes, "globals": globs}
-
-    def _get_action_mask(self, valid_swaps):
-        mask = np.zeros(self.n_actions, dtype=bool)
-        for swap in valid_swaps:
-            idx = self._encode_action(swap)
-            mask[idx] = True
-        return mask
-
-    # optional but handy for manual play -------------------------------------------------------
-    def render(self):
-        self.sim.display()
 
 
 # -----------------------------------------------------------------------------
@@ -182,9 +90,24 @@ def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1):
         mask: Boolean mask where True indicates valid actions
         dim: Dimension to apply softmax over
     """
+    # Handle case where all actions are masked out
+    if not mask.any():
+        return torch.zeros_like(logits)
+        
+    # Normalize logits for numerical stability
+    logits = logits - logits.max(dim=dim, keepdim=True)[0]
+    
     # Set invalid actions to a large negative number
     logits = logits.masked_fill(~mask, float('-inf'))
-    return torch.softmax(logits, dim=dim)
+    
+    # Apply softmax
+    probs = torch.softmax(logits, dim=dim)
+    
+    # Ensure we have a valid probability distribution
+    probs = probs.masked_fill(~mask, 0.0)
+    probs = probs / (probs.sum(dim=dim, keepdim=True) + 1e-8)
+    
+    return probs
 
 
 @dataclass
