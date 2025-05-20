@@ -160,28 +160,6 @@ class SevenWondersSimulator:
                 return True
         return False
 
-
-    def get_state_representation(self) -> np.ndarray:
-        """
-        Returns a (17, rows, cols) float32 tensor:
-        • 13 one‑hot planes for `content`
-        • 3  one‑hot planes for `background`
-        • 1  binary plane for `mask` (holes)
-        """
-        # --- 13 content planes --------------------------------------------------
-        content_oh = np.eye(config.N_CONTENT, dtype=np.float32)[self.content]          # (rows, cols, 13)
-        content_oh = np.transpose(content_oh, (2, 0, 1))                        # (13, rows, cols)
-
-        # --- 3 background planes ----------------------------------------------
-        bg_oh = np.eye(config.N_BG, dtype=np.float32)[self.background]                 # (rows, cols, 3)
-        bg_oh = np.transpose(bg_oh, (2, 0, 1))                                  # (3, rows, cols)
-
-        # --- 1 mask plane ------------------------------------------------------
-        mask_plane = self.mask.astype(np.float32)[None, ...]                    # (1, rows, cols)
-
-        state = np.concatenate([content_oh, bg_oh, mask_plane], axis=0)         # (17, rows, cols)
-        return state
-
     def _find_matches(self) -> Set[Tuple[int, int]]:
         """
         Finds all coordinates of gems involved in matches (3 or more).
@@ -619,7 +597,7 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        step_reward = -1
+        step_reward = -0.3
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -654,7 +632,7 @@ class SevenWondersSimulator:
                 # only queue bonuses that haven't fired yet
                 bonuses_queue.update(chained - processed_bonuses)   
 
-                step_reward += 1  # reward per bonus trigger
+                # step_reward += 1  # reward per bonus trigger
 
           
 
@@ -688,7 +666,7 @@ class SevenWondersSimulator:
             for cr, cc in cleared:
                 self.content[cr, cc] = self.EMPTY
 
-            step_reward += len(cleared) * 0.1
+            # step_reward += len(cleared) * 0.1
 
 
             # floor = 1.0
@@ -780,11 +758,13 @@ class SevenWondersSimulator:
                 print(f"Win check passed")
                 self.display()
 
-            def win_reward(step_count):
-                A = 10000
-                B = np.log(3) / 50
-                return A * np.exp(-B * step_count)
+            # def win_reward(step_count):
+            #     A = 10000
+            #     B = np.log(3) / 50
+            #     return A * np.exp(-B * step_count)
             
+            A, tau = 100.0, 0.05      # adjust A to dominate other rewards
+            step_reward += A * math.exp(-tau * self.step_count)
 
             assert valid_swaps, "Simulator returned no legal moves"
             return step_reward, True, valid_swaps
@@ -804,6 +784,27 @@ class SevenWondersSimulator:
         fragments = self.fragments_on_board 
         step_count = self.step_count
         return np.array([stones_ratio, fragments, step_count], dtype=np.float32)
+    
+    def get_state_representation(self) -> np.ndarray:
+        """
+        Returns a (17, rows, cols) float32 tensor:
+        • 13 one‑hot planes for `content`
+        • 3  one‑hot planes for `background`
+        • 1  binary plane for `mask` (holes)
+        """
+        # --- 13 content planes --------------------------------------------------
+        content_oh = np.eye(config.N_CONTENT, dtype=np.float32)[self.content]          # (rows, cols, 13)
+        content_oh = np.transpose(content_oh, (2, 0, 1))                        # (13, rows, cols)
+
+        # --- 3 background planes ----------------------------------------------
+        bg_oh = np.eye(config.N_BG, dtype=np.float32)[self.background]                 # (rows, cols, 3)
+        bg_oh = np.transpose(bg_oh, (2, 0, 1))                                  # (3, rows, cols)
+
+        # --- 1 mask plane ------------------------------------------------------
+        mask_plane = self.mask.astype(np.float32)[None, ...]                    # (1, rows, cols)
+
+        state = np.concatenate([content_oh, bg_oh, mask_plane], axis=0)         # (17, rows, cols)
+        return state
 
     # convenience – one call returns everything the agent stores
     def get_state_tuple(self):
