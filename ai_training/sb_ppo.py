@@ -95,13 +95,6 @@ def linear_schedule(start: float, end: float):
 
 lr_schedule   = linear_schedule(LR_INITIAL,  LR_FINAL)
 
-class EntropyDecayCallback(BaseCallback):
-    """Linearly decays model.ent_coef from ENT_INITIAL to ENT_FINAL."""
-    def _on_rollout_end(self) -> None:
-        progress = self.model._current_progress_remaining
-        new_coef = ENT_FINAL + (ENT_INITIAL - ENT_FINAL) * progress
-        # needs to be a torch tensor on the same device as the model
-        self.model.ent_coef = torch.as_tensor(new_coef, device=self.model.device)
 
 # --------------------------- vector-env factory --------------------------------
 def make_env(idx: int):
@@ -146,7 +139,7 @@ def main():
         tensorboard_log      = "ai_training/runs/7wonders_ppo_v4",
         policy_kwargs        = policy_kwargs,
     )
-    model.learn(total_timesteps=TOTAL_STEPS, callback=EntropyDecayCallback())
+    model.learn(total_timesteps=TOTAL_STEPS)
     model.save("ai_training/models/7wonders_ppo_v4")
 
 if __name__ == "__main__":
