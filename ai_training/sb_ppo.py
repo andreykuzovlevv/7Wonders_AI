@@ -11,6 +11,7 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.callbacks import BaseCallback
 import config                           # your constants + LEVEL_1 … LEVEL_6
 from .sw_gym_env import SevenWondersEnv
+import os
 
 # --------------------------- global hyper-parameters ---------------------------
 N_ENVS        = 8
@@ -24,12 +25,12 @@ ENT_INITIAL   = 1e-2                    # start with exploration
 ENT_FINAL     = 0.0                     # end fully greedy
 
 CLIP_RANGE    = 0.25
-TARGET_KL     = 0.03                    # stricter than before
+TARGET_KL     = 0.03                   
 
-BATCH_SIZE    = 2_048
-EPOCHS        = 10
+BATCH_SIZE    = 1024
+EPOCHS        = 14
 
-GAMMA         = 0.99
+GAMMA         = 0.95
 GAE_LAMBDA    = 0.95
 
 MAX_MOVES     = 250                     # TimeLimit
@@ -105,6 +106,25 @@ def make_env(idx: int):
         return env
     return _init
 
+class PeriodicSaveCallback(BaseCallback):
+    """
+    Callback for saving a model every `save_freq` steps
+    """
+    def __init__(self, save_freq: int, save_path: str, name_prefix: str = "model", verbose: int = 0):
+        super().__init__(verbose)
+        self.save_freq = save_freq
+        self.save_path = save_path
+        self.name_prefix = name_prefix
+        os.makedirs(save_path, exist_ok=True)
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq == 0:
+            path = os.path.join(self.save_path, f"{self.name_prefix}_{self.n_calls}")
+            self.model.save(path)
+            if self.verbose > 0:
+                print(f"Saving model checkpoint to {path}")
+        return True
+
 def main():
     vec_env = SubprocVecEnv([make_env(i) for i in range(N_ENVS)])
     vec_env = VecMonitor(vec_env)
@@ -121,6 +141,10 @@ def main():
         features_extractor_kwargs  = dict(features_dim=512),
         net_arch                   = dict(pi=[256, 128], vf=[256, 128]),
     )
+
+    # Create save directory
+    save_dir = "ai_training/models/7wonders_ppo_v4"
+    os.makedirs(save_dir, exist_ok=True)
 
     model = MaskablePPO(
         policy               = "MultiInputPolicy",
@@ -139,8 +163,21 @@ def main():
         tensorboard_log      = "ai_training/runs/7wonders_ppo_v4",
         policy_kwargs        = policy_kwargs,
     )
-    model.learn(total_timesteps=TOTAL_STEPS)
-    model.save("ai_training/models/7wonders_ppo_v4")
+
+    # Create callback for saving every 1M steps
+    save_callback = PeriodicSaveCallback(
+        save_freq=1_000_000,
+        save_path=save_dir,
+        name_prefix="7wonders_ppo_v4",
+        verbose=1
+    )
+
+    model.learn(
+        total_timesteps=TOTAL_STEPS,
+        progress_bar=True,
+        callback=save_callback
+    )
+    model.save(os.path.join(save_dir, "7wonders_ppo_v4_final"))
 
 if __name__ == "__main__":
     main()
