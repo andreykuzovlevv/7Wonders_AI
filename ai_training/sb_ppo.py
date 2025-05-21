@@ -1,26 +1,51 @@
-from sb3_contrib import MaskablePPO
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
-from .sw_gym_env import SevenWondersEnv
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-import torch.nn as nn
+# train_7wonders_ppo_v4.py
+# detached, minimal-boilerplate version – ready to run
+from __future__ import annotations
+import gymnasium as gym
+import numpy as np
 import torch
-import gymnasium as gym     
+import torch.nn as nn
+from sb3_contrib import MaskablePPO
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.callbacks import BaseCallback
+import config                           # your constants + LEVEL_1 … LEVEL_6
+from .sw_gym_env import SevenWondersEnv
 
-N_ENVS       = 8                 # more decorrelated data
-HORIZON      = 4096              # n_steps
-TOTAL_STEPS  = 10_000_000        # let it actually learn
-LR_INITIAL   = 1e-3
-LR_FINAL     = 1e-4              # linear decay
-ENT_COEF     = 1e-2              # keep entropy up
-CLIP_RANGE   = 0.25              # allow larger moves
-BATCH_SIZE   = 1024
-EPOCHS       = 10
-GAMMA        = 0.995             # long episodes
-GAE_LAMBDA   = 0.95
-MAX_MOVES = 250
+# --------------------------- global hyper-parameters ---------------------------
+N_ENVS        = 8
+HORIZON       = 4_096                   # n_steps
+TOTAL_STEPS   = 10_000_000
 
+LR_INITIAL    = 1e-3
+LR_FINAL      = 1e-4
+
+ENT_INITIAL   = 1e-2                    # start with exploration
+ENT_FINAL     = 0.0                     # end fully greedy
+
+CLIP_RANGE    = 0.25
+TARGET_KL     = 0.03                    # stricter than before
+
+BATCH_SIZE    = 2_048
+EPOCHS        = 10
+
+GAMMA         = 0.99
+GAE_LAMBDA    = 0.95
+
+MAX_MOVES     = 250                     # TimeLimit
+
+LEVELS        = [
+    config.LEVEL_1, config.LEVEL_1, config.LEVEL_1,  # 3× easy
+    config.LEVEL_2,
+    config.LEVEL_3,
+    config.LEVEL_4,
+    config.LEVEL_5,
+    config.LEVEL_6,
+]
+
+# ------------------------- custom feature extractor ----------------------------
 class ResidualBlock(nn.Module):
-    def __init__(self, ch):
+    def __init__(self, ch: int):
         super().__init__()
         self.conv1 = nn.Conv2d(ch, ch, 3, padding=1)
         self.conv2 = nn.Conv2d(ch, ch, 3, padding=1)
@@ -33,10 +58,10 @@ class ResidualBlock(nn.Module):
 
 class ResCNNWithGlobals(BaseFeaturesExtractor):
     """
-    6-layer ResNet on the 17×HxW board planes  +  FC on the 3 global scalars.
-    Output dim = 512  (384 from CNN, 128 from globals)
+    6-layer ResNet on 17×H×W board planes + FC on 4 global scalars.
+    Output dim = 512 (384 from CNN, 128 from globals)
     """
-    def __init__(self, obs_space, features_dim=512):
+    def __init__(self, obs_space, features_dim: int = 512):
         super().__init__(obs_space, features_dim)
         c, h, w = obs_space["board"].shape
 
@@ -47,59 +72,82 @@ class ResCNNWithGlobals(BaseFeaturesExtractor):
             nn.Conv2d(64, 96, 3, padding=1), nn.ReLU(),
             ResidualBlock(96),
             ResidualBlock(96),
-            nn.Flatten(),                                    # → 96 × H × W
+            nn.Flatten(),                         # → 96 × H × W
         )
         self.head = nn.Sequential(
-            nn.Linear(96*h*w, 384), nn.ReLU()
+            nn.Linear(96 * h * w, 384), nn.ReLU()
         )
         self.globals = nn.Sequential(
-            nn.Linear(3, 128), nn.ReLU()
+            nn.Linear(4, 128), nn.ReLU()          # globals dim unchanged
         )
 
     def forward(self, obs):
-        b = self.head(self.stem(obs["board"]))
-        g = self.globals(obs["globals"])
-        return torch.cat([b, g], dim=1)
+        board_lat = self.head(self.stem(obs["board"]))
+        glob_lat  = self.globals(obs["globals"])
+        return torch.cat([board_lat, glob_lat], dim=1)
 
+# ----------------------------- schedules ---------------------------------------
+def linear_schedule(start: float, end: float):
+    """SB3 linear schedule helper."""
+    def _schedule(progress_remaining: float):
+        return end + (start - end) * progress_remaining
+    return _schedule
+
+lr_schedule   = linear_schedule(LR_INITIAL,  LR_FINAL)
+
+class EntropyDecayCallback(BaseCallback):
+    """Linearly decays model.ent_coef from ENT_INITIAL to ENT_FINAL."""
+    def _on_rollout_end(self) -> None:
+        progress = self.model._current_progress_remaining
+        new_coef = ENT_FINAL + (ENT_INITIAL - ENT_FINAL) * progress
+        # needs to be a torch tensor on the same device as the model
+        self.model.ent_coef = torch.as_tensor(new_coef, device=self.model.device)
+
+# --------------------------- vector-env factory --------------------------------
+def make_env(idx: int):
+    level = LEVELS[idx % len(LEVELS)]
+    def _init() -> gym.Env:
+        env = SevenWondersEnv(level=level)
+        env = gym.wrappers.TimeLimit(env, MAX_MOVES)
+        return env
+    return _init
 
 def main():
+    vec_env = SubprocVecEnv([make_env(i) for i in range(N_ENVS)])
+    vec_env = VecMonitor(vec_env)
+    vec_env = VecNormalize(
+        vec_env,
+        norm_obs=True,                       # observation normalisation
+        norm_reward=True,                    # reward normalisation
+        clip_obs=5.0,
+    )
 
-    def make_env():
-        env = gym.wrappers.TimeLimit(SevenWondersEnv(), MAX_MOVES)
-        return env
-
-    vec_env = VecMonitor(SubprocVecEnv([make_env]*N_ENVS))
-
-    def lr_schedule_function(progress_remaining):
-        return LR_FINAL + (LR_INITIAL - LR_FINAL) * progress_remaining
-
-    lr_schedule = lr_schedule_function
-
+    # ------------------------------- PPO -------------------------------------------
     policy_kwargs = dict(
-        features_extractor_class = ResCNNWithGlobals,
-        features_extractor_kwargs= dict(features_dim=512),
-        net_arch                = [dict(pi=[256,128], vf=[256,128])]
+        features_extractor_class   = ResCNNWithGlobals,
+        features_extractor_kwargs  = dict(features_dim=512),
+        net_arch                   = dict(pi=[256, 128], vf=[256, 128]),
     )
 
     model = MaskablePPO(
-        "MultiInputPolicy",
-        vec_env,
+        policy               = "MultiInputPolicy",
+        env                  = vec_env,
         learning_rate        = lr_schedule,
+        ent_coef             = ENT_INITIAL,
         n_steps              = HORIZON,
         batch_size           = BATCH_SIZE,
         n_epochs             = EPOCHS,
         gamma                = GAMMA,
         gae_lambda           = GAE_LAMBDA,
         clip_range           = CLIP_RANGE,
-        ent_coef             = ENT_COEF,
+        target_kl            = TARGET_KL,
         max_grad_norm        = 0.5,
-        target_kl            = 0.03,        # let it move, but stop divergence
         verbose              = 1,
-        tensorboard_log      = "ai_training/runs/7wonders_ppo_v3",
+        tensorboard_log      = "ai_training/runs/7wonders_ppo_v4",
         policy_kwargs        = policy_kwargs,
     )
-    model.learn(total_timesteps=TOTAL_STEPS)
-    model.save("ai_training/models/7wonders_ppo_v2")
+    model.learn(total_timesteps=TOTAL_STEPS, callback=EntropyDecayCallback())
+    model.save("ai_training/models/7wonders_ppo_v4")
 
 if __name__ == "__main__":
     main()

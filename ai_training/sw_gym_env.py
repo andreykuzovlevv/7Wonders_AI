@@ -38,8 +38,8 @@ class SevenWondersEnv(gym.Env):
         # (17, rows, cols) board tensor  +  (3,) global features  →  Dict space
         board_low = np.zeros((17, rows, cols), dtype=np.float32)
         board_high = np.ones_like(board_low)
-        globals_low = np.zeros(3, dtype=np.float32)
-        globals_high = np.ones(3, dtype=np.float32)
+        globals_low = np.zeros(4, dtype=np.float32)
+        globals_high = np.ones(4, dtype=np.float32)
         self.observation_space = gym.spaces.Dict(
             {
                 "board": gym.spaces.Box(board_low, board_high, dtype=np.float32),

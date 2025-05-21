@@ -218,7 +218,7 @@ class SevenWondersGUI:
                 swap = (self.selected_tile, (r, c))
                 if swap in valid_swaps or (swap[1], swap[0]) in valid_swaps:
                     # Execute the swap
-                    new_state, reward, done = self.game.step(swap)
+                    reward, done, valid_swaps = self.game.step(swap)
                     if done:
                         print(f"Game Over! Final Score: {self.game.score}")
                         pygame.quit()

@@ -36,7 +36,7 @@ class SevenWondersSimulator:
         self.initial_stones = 0
         self.stones_cleared = 0
         self.fragments_on_board = 0
-        self.max_fragments = 5  # Example limit
+        self.max_fragments = 1
         self.fragment_spawned = False 
         self.debug_mode = debug_mode  # Flag to control debug output
 
@@ -257,11 +257,11 @@ class SevenWondersSimulator:
 
             cluster_reward = 0
             if cluster_size >= 6:
-                cluster_reward += 0.6
-            elif cluster_size == 5:
                 cluster_reward += 0.4
-            elif cluster_size == 4:
+            elif cluster_size == 5:
                 cluster_reward += 0.2
+            elif cluster_size == 4:
+                cluster_reward += 0.1
             total_reward += cluster_reward
 
             # 4‑match → BONUS_0, 5+ → BONUS_1
@@ -597,7 +597,7 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        step_reward = -0.3
+        step_reward = -2
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -632,7 +632,7 @@ class SevenWondersSimulator:
                 # only queue bonuses that haven't fired yet
                 bonuses_queue.update(chained - processed_bonuses)   
 
-                # step_reward += 1  # reward per bonus trigger
+                step_reward += 1  # reward per bonus trigger
 
           
 
@@ -646,7 +646,7 @@ class SevenWondersSimulator:
                 
                 # Get match details to determine bonus placement and additional rewards
                 md = self._get_match_details(matches, swap_action)
-                # step_reward += md['total_reward']
+                step_reward += md['total_reward']
                 
                 # Place bonuses at the appropriate positions
                 for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
@@ -678,73 +678,83 @@ class SevenWondersSimulator:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 2
+                    step_reward += 5
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 1
+                    step_reward += 3
 
             for br, bc in to_break:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_STONE
-                    step_reward += 1
+                    step_reward += 2
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 1
+                    step_reward += 3
 
-            # E. gravity + refill (handles bonus‑2 & fragment drops) -------
-            
-            if self.fragments_on_board > 0:
-                fragment_coords_before = []
-                # Find each coordinate of the fragments before gravity
-                for r in range(self.rows):
-                    for c in range(self.cols):
-                        if self.content[r, c] == self.FRAGMENT:
-                            fragment_coords_before.append((r, c))
-                            
+            # E. gravity + refill (handles bonus-2 & fragment drops) -------
+            # 1) capture before-gravity fragment rows
+            prev = [(r, c) for r in range(self.rows)
+                           for c in range(self.cols)
+                           if self.content[r, c] == self.FRAGMENT]
+
+            # 2) apply gravity
             self._apply_gravity()
-            if self.debug_mode:
-                print(f"Applied gravity")
 
-            # Calculate reward for fragment movement after gravity
-            if self.fragments_on_board > 0:
-                fragment_coords_after = []
-                # Find each coordinate of the fragments after gravity
-                for r in range(self.rows):
-                    for c in range(self.cols):
-                        if self.content[r, c] == self.FRAGMENT:
-                            fragment_coords_after.append((r, c))
-                
-                # Calculate movement and reward
-                fragment_movement_reward = 0
-                for before in fragment_coords_before:
-                    for after in fragment_coords_after:
-                        # Check if fragments are in the same column (they should be)
-                        if before[1] == after[1]:
-                            # Calculate how many rows the fragment moved down
-                            rows_moved = after[0] - before[0]
-                            if rows_moved > 0:  # Only reward downward movement
-                                fragment_movement_reward += rows_moved
-                
-                # Add the fragment movement reward to the total score
-                step_reward += fragment_movement_reward * 3
+            # 3) capture after-gravity positions
+            post = {(r, c) for r in range(self.rows)
+                         for c in range(self.cols)
+                         if self.content[r, c] == self.FRAGMENT}
 
-                if self.debug_mode and fragment_movement_reward > 0:
-                    print(f"Fragment movement reward: {fragment_movement_reward}")
+            # 4) precompute bottom playable row per column (only for columns with any valid cells)
+            bottom_row = {
+                c: max(r for r in range(self.rows) if self._is_valid_coord(r, c))
+                for c in range(self.cols)
+                if any(self._is_valid_coord(r, c) for r in range(self.rows))
+            }
+
+            # 5) reward parameters
+            MOVE_BONUS = 5    # per-tile moved
+            EXIT_BONUS = 10   # per fragment exit
+
+            move_reward = 0
+            exit_reward = 0
+
+            for r0, c0 in prev:
+                # did this fragment survive?
+                survivors = [r1 for (r1, c1) in post if c1 == c0]
+                if survivors:
+                    # reward how many rows it fell
+                    dr = max(survivors) - r0
+                    if dr > 0:
+                        move_reward += dr
+                else:
+                    # it fell off: count both its entire drop and the extra exit bonus
+                    dr = (bottom_row[c0] - r0 + 1)
+                    move_reward += dr
+                    exit_reward += 1
+
+            # 6) add to step reward
+            step_reward += MOVE_BONUS * move_reward
+            step_reward += EXIT_BONUS * exit_reward
+
+            if self.debug_mode and (move_reward or exit_reward):
+                print(f"Fragment fell {move_reward} cells (×{MOVE_BONUS}),"
+                      f" exited {exit_reward} times (×{EXIT_BONUS})")
 
             self._refill_board()
             if self.debug_mode:
                 print(f"Refilled board")
 
-        # ---- 3. SHUFFLE IF STUCK ----------------------------------------
-        valid_swaps = self.get_valid_swaps()
-        if not valid_swaps:
-            if self.debug_mode:
-                print(f"No valid swaps, shuffling board")
-            if not self._shuffle_board():  # shuffle failed to produce a move
-                raise Exception("Shuffle failed to produce a move")
+            # ---- 3. SHUFFLE IF STUCK ----------------------------------------
             valid_swaps = self.get_valid_swaps()
+            if not valid_swaps:
+                if self.debug_mode:
+                    print(f"No valid swaps, shuffling board")
+                if not self._shuffle_board():  # shuffle failed to produce a move
+                    raise Exception("Shuffle failed to produce a move")
+                valid_swaps = self.get_valid_swaps()
 
         
 
@@ -779,11 +789,12 @@ class SevenWondersSimulator:
         return step_reward, False, valid_swaps
     
     def get_global_features(self) -> np.ndarray:
-        """3 floats in [0,1] – tweak as you like."""
+        """4 floats in [0,1] – tweak as you like."""
         stones_ratio = self.stones_cleared / max(1, self.initial_stones)
-        fragments = self.fragments_on_board 
-        step_count = self.step_count
-        return np.array([stones_ratio, fragments, step_count], dtype=np.float32)
+        fragments = self.fragments_on_board
+        step_count = self.step_count / 250
+        bonus_count = self.bonus2_trigger_count % 4 / 4
+        return np.array([stones_ratio, fragments, step_count, bonus_count], dtype=np.float32)
     
     def get_state_representation(self) -> np.ndarray:
         """
