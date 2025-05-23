@@ -587,7 +587,7 @@ class SevenWondersSimulator:
 
         # ---- 0. basic legality checks ------------------------------------
         if swap_action not in valid_swaps:
-            return -5, False, valid_swaps
+            return -2, False, valid_swaps
 
         # ---- 1. perform swap (background never moves) --------------------
         self.step_count += 1
@@ -774,8 +774,8 @@ class SevenWondersSimulator:
             #     B = np.log(3) / 50
             #     return A * np.exp(-B * step_count)
             
-            A, tau = 100.0, 0.05      # adjust A to dominate other rewards
-            step_reward += A * math.exp(-tau * self.step_count)
+            # A, tau = 100.0, 0.05      # adjust A to dominate other rewards
+            # step_reward += A * math.exp(-tau * self.step_count)
 
             assert valid_swaps, "Simulator returned no legal moves"
             return step_reward, True, valid_swaps
