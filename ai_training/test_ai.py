@@ -29,14 +29,14 @@ def test_model(model_path='q_local_final.pth', n_tests=10):
             state = env.get_state_tuple()
             steps = 0
             done = False
+            valid_swaps = env.get_valid_swaps()
             
             while not done:
-                valid_swaps = env.get_valid_swaps()
                 action = agent.act(*state, valid_swaps, eps=0)  # No exploration during testing
                 if action is None:
                     break
                     
-                next_board, reward, done = env.step(action)
+                step_reward, done, valid_swaps = env.step(action)
                 next_state = env.get_state_tuple()
                 state = next_state
                 steps += 1

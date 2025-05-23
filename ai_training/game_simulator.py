@@ -597,7 +597,7 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        step_reward = -2
+        step_reward = -1
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -646,7 +646,7 @@ class SevenWondersSimulator:
                 
                 # Get match details to determine bonus placement and additional rewards
                 md = self._get_match_details(matches, swap_action)
-                step_reward += md['total_reward']
+                # step_reward += md['total_reward']
                 
                 # Place bonuses at the appropriate positions
                 for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
@@ -654,6 +654,7 @@ class SevenWondersSimulator:
                         print(f"Placing bonus at {bonus_r, bonus_c}")
                     # The position will be cleared, then we'll place the bonus there
                     self.content[bonus_r, bonus_c] = bonus_type
+                    step_reward += 3
                     # Remove from the cleared set so the bonus doesn't get removed
                     if (bonus_r, bonus_c) in cleared:
                         cleared.remove((bonus_r, bonus_c))
@@ -678,20 +679,20 @@ class SevenWondersSimulator:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 5
+                    step_reward += 8
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 3
+                    step_reward += 5
 
             for br, bc in to_break:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_STONE
-                    step_reward += 2
+                    step_reward += 3
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 3
+                    step_reward += 5
 
             # E. gravity + refill (handles bonus-2 & fragment drops) -------
             # 1) capture before-gravity fragment rows

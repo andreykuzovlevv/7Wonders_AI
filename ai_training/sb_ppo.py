@@ -1,48 +1,50 @@
 # train_7wonders_ppo_v4.py
-# detached, minimal-boilerplate version – ready to run
 from __future__ import annotations
 import gymnasium as gym
-import numpy as np
 import torch
 import torch.nn as nn
-from sb3_contrib import MaskablePPO
+from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.callbacks import BaseCallback
-import config                           # your constants + LEVEL_1 … LEVEL_6
+import config                   
 from .sw_gym_env import SevenWondersEnv
 import os
 
 # --------------------------- global hyper-parameters ---------------------------
 N_ENVS        = 8
-HORIZON       = 4_096                   # n_steps
+HORIZON       = 2048    
 TOTAL_STEPS   = 10_000_000
 
 LR_INITIAL    = 1e-3
 LR_FINAL      = 1e-4
 
-ENT_INITIAL   = 1e-2                    # start with exploration
-ENT_FINAL     = 0.0                     # end fully greedy
+ENT           = 7e-3             
+               
 
 CLIP_RANGE    = 0.25
 TARGET_KL     = 0.03                   
 
 BATCH_SIZE    = 1024
-EPOCHS        = 14
+EPOCHS        = 6
 
-GAMMA         = 0.95
-GAE_LAMBDA    = 0.95
+GAMMA         = 0.7
+GAE_LAMBDA    = 0.65
 
-MAX_MOVES     = 250                     # TimeLimit
+MAX_MOVES     = 250
 
-LEVELS        = [
-    config.LEVEL_1, config.LEVEL_1, config.LEVEL_1,  # 3× easy
-    config.LEVEL_2,
-    config.LEVEL_3,
-    config.LEVEL_4,
-    config.LEVEL_5,
-    config.LEVEL_6,
-]
+# Current setup - only Level 1
+LEVELS = [config.LEVEL_1] * N_ENVS
+
+# Future setup - progressive difficulty levels
+# LEVELS = [
+#     config.LEVEL_1, config.LEVEL_1, config.LEVEL_1,  # 3× easy
+#     config.LEVEL_2,
+#     config.LEVEL_3,
+#     config.LEVEL_4,
+#     config.LEVEL_5,
+#     config.LEVEL_6,
+# ]
 
 # ------------------------- custom feature extractor ----------------------------
 class ResidualBlock(nn.Module):
@@ -57,35 +59,75 @@ class ResidualBlock(nn.Module):
         y = self.conv2(y)
         return self.act(x + y)
 
-class ResCNNWithGlobals(BaseFeaturesExtractor):
+class ImprovedFeatureExtractor(BaseFeaturesExtractor):
     """
-    6-layer ResNet on 17×H×W board planes + FC on 4 global scalars.
-    Output dim = 512 (384 from CNN, 128 from globals)
+    Add attention mechanism to focus on stone-breaking opportunities
     """
-    def __init__(self, obs_space, features_dim: int = 512):
-        super().__init__(obs_space, features_dim)
-        c, h, w = obs_space["board"].shape
-
-        self.stem = nn.Sequential(
-            nn.Conv2d(c, 64, 3, padding=1), nn.ReLU(),
+    
+    def __init__(self, observation_space, features_dim=512):
+        super().__init__(observation_space, features_dim)
+        
+        # Separate processing for different plane types
+        self.content_conv = nn.Sequential(
+            nn.Conv2d(13, 32, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+        )
+        
+        self.background_conv = nn.Sequential(
+            nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(16, 16, 3, padding=1), nn.ReLU(),
+        )
+        
+        # Attention mechanism for stone locations
+        self.stone_attention = nn.Sequential(
+            nn.Conv2d(16, 8, 1), nn.Sigmoid()  # Attention weights for background
+        )
+        
+        # Combined processing
+        self.combined_conv = nn.Sequential(
+            nn.Conv2d(48 + 1, 64, 3, padding=1), nn.ReLU(),  # 32+16+1 input channels
             ResidualBlock(64),
             ResidualBlock(64),
             nn.Conv2d(64, 96, 3, padding=1), nn.ReLU(),
-            ResidualBlock(96),
-            ResidualBlock(96),
-            nn.Flatten(),                         # → 96 × H × W
+            nn.Flatten()
         )
+        
+        # Assume 10x10 board
         self.head = nn.Sequential(
-            nn.Linear(96 * h * w, 384), nn.ReLU()
+            nn.Linear(96 * 100, 384), nn.ReLU(),
+            nn.Dropout(0.2)
         )
-        self.globals = nn.Sequential(
-            nn.Linear(4, 128), nn.ReLU()          # globals dim unchanged
+        
+        self.globals_net = nn.Sequential(
+            nn.Linear(4, 128), nn.ReLU(),  # Updated for new global features
+            nn.Dropout(0.2)
         )
-
-    def forward(self, obs):
-        board_lat = self.head(self.stem(obs["board"]))
-        glob_lat  = self.globals(obs["globals"])
-        return torch.cat([board_lat, glob_lat], dim=1)
+        
+    def forward(self, observations):
+        board = observations["board"]
+        globals_feat = observations["globals"]
+        
+        # Split board into content, background, and mask
+        content = board[:, :13, :, :]      # First 13 channels
+        background = board[:, 13:16, :, :] # Next 3 channels  
+        mask = board[:, 16:17, :, :]       # Last channel
+        
+        # Process content and background separately
+        content_feat = self.content_conv(content)
+        background_feat = self.background_conv(background)
+        
+        # Apply attention to background features (focus on stones)
+        attention_weights = self.stone_attention(background_feat)
+        background_feat = background_feat * attention_weights
+        
+        # Combine all features
+        combined = torch.cat([content_feat, background_feat, mask], dim=1)
+        combined_feat = self.head(self.combined_conv(combined))
+        
+        # Process global features
+        global_feat = self.globals_net(globals_feat)
+        
+        return torch.cat([combined_feat, global_feat], dim=1)
 
 # ----------------------------- schedules ---------------------------------------
 def linear_schedule(start: float, end: float):
@@ -106,38 +148,14 @@ def make_env(idx: int):
         return env
     return _init
 
-class PeriodicSaveCallback(BaseCallback):
-    """
-    Callback for saving a model every `save_freq` steps
-    """
-    def __init__(self, save_freq: int, save_path: str, name_prefix: str = "model", verbose: int = 0):
-        super().__init__(verbose)
-        self.save_freq = save_freq
-        self.save_path = save_path
-        self.name_prefix = name_prefix
-        os.makedirs(save_path, exist_ok=True)
-
-    def _on_step(self) -> bool:
-        if self.n_calls % self.save_freq == 0:
-            path = os.path.join(self.save_path, f"{self.name_prefix}_{self.n_calls}")
-            self.model.save(path)
-            if self.verbose > 0:
-                print(f"Saving model checkpoint to {path}")
-        return True
-
 def main():
     vec_env = SubprocVecEnv([make_env(i) for i in range(N_ENVS)])
     vec_env = VecMonitor(vec_env)
-    vec_env = VecNormalize(
-        vec_env,
-        norm_obs=True,                       # observation normalisation
-        norm_reward=True,                    # reward normalisation
-        clip_obs=5.0,
-    )
+
 
     # ------------------------------- PPO -------------------------------------------
     policy_kwargs = dict(
-        features_extractor_class   = ResCNNWithGlobals,
+        features_extractor_class   = ImprovedFeatureExtractor,
         features_extractor_kwargs  = dict(features_dim=512),
         net_arch                   = dict(pi=[256, 128], vf=[256, 128]),
     )
@@ -146,11 +164,11 @@ def main():
     save_dir = "ai_training/models/7wonders_ppo_v4"
     os.makedirs(save_dir, exist_ok=True)
 
-    model = MaskablePPO(
+    model = PPO(
         policy               = "MultiInputPolicy",
         env                  = vec_env,
         learning_rate        = lr_schedule,
-        ent_coef             = ENT_INITIAL,
+        ent_coef             = ENT,
         n_steps              = HORIZON,
         batch_size           = BATCH_SIZE,
         n_epochs             = EPOCHS,
@@ -159,23 +177,17 @@ def main():
         clip_range           = CLIP_RANGE,
         target_kl            = TARGET_KL,
         max_grad_norm        = 0.5,
-        verbose              = 1,
+        verbose              = 0,
         tensorboard_log      = "ai_training/runs/7wonders_ppo_v4",
         policy_kwargs        = policy_kwargs,
+        vf_coef=0.25
     )
 
-    # Create callback for saving every 1M steps
-    save_callback = PeriodicSaveCallback(
-        save_freq=1_000_000,
-        save_path=save_dir,
-        name_prefix="7wonders_ppo_v4",
-        verbose=1
-    )
+
 
     model.learn(
         total_timesteps=TOTAL_STEPS,
         progress_bar=True,
-        callback=save_callback
     )
     model.save(os.path.join(save_dir, "7wonders_ppo_v4_final"))
 
