@@ -285,9 +285,9 @@ class SevenWondersSimulator:
         }
 
 
-    def get_valid_swaps(self) -> Set[Swap]:
+    def get_valid_swaps(self) -> List[Swap]:
         """
-        Return every legal swap the player can make.
+        Return every legal swap the player can make, including all directions.
 
         Rules
         -----
@@ -296,8 +296,11 @@ class SevenWondersSimulator:
         • If either tile is a BONUS (bonus_0, bonus_1, bonus_2) → the swap is
         immediately valid (bonuses always fire when moved).
         • Otherwise the swap must create ≥ 1 gem match.
+        
+        Note: This returns ALL directional swaps (including symmetric ones like
+        (1,1)→(1,2) and (1,2)→(1,1)) to align with the expanded action space.
         """
-        valid_swaps: Set[Swap] = set()
+        valid_swaps: List[Swap] = []
 
         def is_swappable(r: int, c: int) -> bool:
             """Can the tile at (r, c) take part in a swap?"""
@@ -312,37 +315,32 @@ class SevenWondersSimulator:
         def is_bonus(tile_val: int) -> bool:
             return self.BONUS_0 <= tile_val <= self.BONUS_2
 
-        # Iterate through every cell; consider right‑ and bottom‑ neighbour only → no duplicates
+        # Iterate through every cell; consider all 4 directions
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # up, down, left, right
+        
         for r in range(self.rows):
             for c in range(self.cols):
                 if not is_swappable(r, c):
                     continue
 
-                # --- swap with right neighbour ---------------------------------
-                if c + 1 < self.cols and is_swappable(r, c + 1):
-                    t1, t2 = self.content[r, c], self.content[r, c + 1]
+                for dr, dc in directions:
+                    nr, nc = r + dr, c + dc
+                    if not (0 <= nr < self.rows and 0 <= nc < self.cols):
+                        continue
+                    if not is_swappable(nr, nc):
+                        continue
+
+                    t1, t2 = self.content[r, c], self.content[nr, nc]
 
                     if is_bonus(t1) or is_bonus(t2):
-                        valid_swaps.add(((r, c), (r, c + 1)))
+                        valid_swaps.append(((r, c), (nr, nc)))
                     else:
                         # need to test for a resulting match
-                        self._swap_cells(r, c, r, c + 1)
-                        if self.swap_creates_match(r, c, r, c + 1):
-                            valid_swaps.add(((r, c), (r, c + 1)))
+                        self._swap_cells(r, c, nr, nc)
+                        if self.swap_creates_match(r, c, nr, nc):
+                            valid_swaps.append(((r, c), (nr, nc)))
                         # restore board
-                        self._swap_cells(r, c, r, c + 1)
-
-                # --- swap with bottom neighbour -------------------------------
-                if r + 1 < self.rows and is_swappable(r + 1, c):
-                    t1, t2 = self.content[r, c], self.content[r + 1, c]
-
-                    if is_bonus(t1) or is_bonus(t2):
-                        valid_swaps.add(((r, c), (r + 1, c)))
-                    else:
-                        self._swap_cells(r, c, r + 1, c)
-                        if self.swap_creates_match(r, c, r + 1, c):
-                            valid_swaps.add(((r, c), (r + 1, c)))
-                        self._swap_cells(r, c, r + 1, c)
+                        self._swap_cells(r, c, nr, nc)
 
         return valid_swaps
 
@@ -597,7 +595,7 @@ class SevenWondersSimulator:
             self.content[r1, c1],
         )
 
-        step_reward = -1
+        step_reward = -3
 
         bonuses_queue = set()  # bonuses that will explode immediately
 
@@ -632,7 +630,7 @@ class SevenWondersSimulator:
                 # only queue bonuses that haven't fired yet
                 bonuses_queue.update(chained - processed_bonuses)   
 
-                step_reward += 1  # reward per bonus trigger
+                step_reward += 2  # reward per bonus trigger
 
           
 
@@ -654,7 +652,7 @@ class SevenWondersSimulator:
                         print(f"Placing bonus at {bonus_r, bonus_c}")
                     # The position will be cleared, then we'll place the bonus there
                     self.content[bonus_r, bonus_c] = bonus_type
-                    step_reward += 3
+                    step_reward += 5
                     # Remove from the cleared set so the bonus doesn't get removed
                     if (bonus_r, bonus_c) in cleared:
                         cleared.remove((bonus_r, bonus_c))
@@ -670,29 +668,43 @@ class SevenWondersSimulator:
             # step_reward += len(cleared) * 0.1
 
 
-            # floor = 1.0
-            # A, mid, k = 350.0, 70.0, 0.07
-            # m = (A - floor) / (1 + math.exp(k * (self.step_count - mid))) + floor
-
             # D. break background tiles -----------------------------------
+
+            def raised_cosine_multiplier(step, min_n=1, max_n=4, low=20, high=60):
+                """
+                Smooth multiplier based on a raised cosine window.
+                - Returns min_n outside the [low, high] range.
+                - Peaks at max_n at the midpoint.
+                - Smooth at edges: no jumps or sharp transitions.
+                """
+                if low <= step <= high:
+                    x = (step - (low + high) / 2) / ((high - low) / 2)  # normalised [-1, 1]
+                    window = 0.5 * (1 + math.cos(math.pi * x))  # raised cosine
+                    return min_n + (max_n - min_n) * window
+                return min_n
+            
+            break_reward = 0
+            stones_cleared_before = self.stones_cleared
             for br, bc in bonus_breaks:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 8
+                    break_reward += 8
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 5
+                    break_reward += 5
 
             for br, bc in to_break:
                 if self.background[br, bc] == self.BG_SHIELD:
                     self.background[br, bc] = self.BG_STONE
-                    step_reward += 3
+                    break_reward += 3
                 elif self.background[br, bc] == self.BG_STONE:
                     self.background[br, bc] = self.BG_NONE
                     self.stones_cleared += 1
-                    step_reward += 5
+                    break_reward += 5
+
+            step_reward += break_reward + (self.stones_cleared - stones_cleared_before) * raised_cosine_multiplier(self.step_count)
 
             # E. gravity + refill (handles bonus-2 & fragment drops) -------
             # 1) capture before-gravity fragment rows
@@ -793,7 +805,7 @@ class SevenWondersSimulator:
         """4 floats in [0,1] – tweak as you like."""
         stones_ratio = self.stones_cleared / max(1, self.initial_stones)
         fragments = self.fragments_on_board
-        step_count = self.step_count / 250
+        step_count = self.step_count / 400
         bonus_count = self.bonus2_trigger_count % 4 / 4
         return np.array([stones_ratio, fragments, step_count, bonus_count], dtype=np.float32)
     
