@@ -3,22 +3,19 @@ from __future__ import annotations
 import gymnasium as gym
 import torch
 import torch.nn as nn
-from sb3_contrib import MaskablePPO
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
+from sb3_contrib import RecurrentPPO
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.utils import linear_schedule
+from typing import Callable
 import config                   
 from .sw_gym_env import SevenWondersEnv
 import os
-import numpy as np
-from dataclasses import dataclass
-from typing import List
 
 # --------------------------- global hyper-parameters ---------------------------
 N_ENVS        = 8
 HORIZON       = 2048    
-TOTAL_STEPS   = 2_000_000  # Extended to 2M for curriculum
+TOTAL_STEPS   = 10_000_000
 
 LR_INITIAL    = 1e-3
 LR_FINAL      = 1e-4
@@ -26,8 +23,8 @@ LR_FINAL      = 1e-4
 ENT           = 1e-3            
                
 
-CLIP_RANGE    = 0.25
-TARGET_KL     = 0.03                   
+CLIP_RANGE    = 0.15
+TARGET_KL     = None                  
 
 BATCH_SIZE    = 1024
 EPOCHS        = 6
@@ -41,33 +38,31 @@ LEVELS = [config.LEVEL_1, config.LEVEL_2, config.LEVEL_3,
           config.LEVEL_4, config.LEVEL_5, config.LEVEL_6,
           config.LEVEL_7]
 
-# --------------------- curriculum callback -----------------------------------
-class CurriculumCallback(BaseCallback):
-    """Progressively unlocks levels during training."""
+# Level distribution: 3 x Level 1, 1 each of others
+LEVEL_DISTRIBUTION = [
+    config.LEVEL_1, config.LEVEL_1,
+    config.LEVEL_2, config.LEVEL_3, config.LEVEL_4,
+    config.LEVEL_5, config.LEVEL_6, config.LEVEL_7
+]
+
+# --------------------------- learning rate schedule ---------------------------
+def linear_lr_schedule(initial_lr: float, final_lr: float) -> Callable[[float], float]:
+    """
+    Linear learning rate schedule that decays from initial_lr to final_lr.
     
-    def __init__(self, levels, total_steps, verbose=0):
-        super().__init__(verbose)
-        self.levels = levels
-        self.interval = total_steps // len(levels)  # ~285,714 steps per level
-        self.next_idx = 1  # index of level to unlock next (start with level 2)
+    Args:
+        initial_lr: Starting learning rate
+        final_lr: Ending learning rate
         
-        if self.verbose:
-            print(f"[Curriculum] Will unlock {len(levels)} levels over {total_steps} steps")
-            print(f"[Curriculum] Unlocking interval: {self.interval} steps")
-
-    def _on_step(self) -> bool:
-        if self.next_idx >= len(self.levels):
-            return True  # everything is already unlocked
-
-        if self.num_timesteps >= self.next_idx * self.interval:
-            new_lvl = self.levels[self.next_idx]
-            # broadcast into every worker process
-            self.training_env.env_method("unlock_level", new_lvl)
-            if self.verbose:
-                print(f"[Curriculum] Step {self.num_timesteps}: Unlocked level {self.next_idx + 1} (config value: {new_lvl})")
-            self.next_idx += 1
-        return True
-
+    Returns:
+        Schedule function that takes remaining progress (1.0 -> 0.0) and returns lr
+    """
+    def lr_func(progress_remaining: float) -> float:
+        # progress_remaining goes from 1.0 (start) to 0.0 (end)
+        # We want lr to go from initial_lr to final_lr
+        return final_lr + (initial_lr - final_lr) * progress_remaining
+    
+    return lr_func
 
 # ------------------------- custom feature extractor ----------------------------
 
@@ -184,35 +179,37 @@ class Match3Extractor(BaseFeaturesExtractor):
 
 
 # --------------------------- vector-env factory --------------------------------
-def make_env(idx: int):
-    """Create environment factory - level will be set dynamically"""
+def make_env(level_config):
+    """Create environment factory for specific level"""
     def _init() -> gym.Env:
-        # Start with Level 1, will be updated by curriculum
-        env = SevenWondersEnv(level=config.LEVEL_1)
+        env = SevenWondersEnv(level=level_config)
         env = gym.wrappers.TimeLimit(env, MAX_MOVES)
         return env
     return _init
 
 def main():
-    # Initialize environments with Level 1
-    vec_env = SubprocVecEnv([make_env(i) for i in range(N_ENVS)])
+    # Initialize environments with distributed levels
+    vec_env = SubprocVecEnv([make_env(LEVEL_DISTRIBUTION[i]) for i in range(N_ENVS)])
     vec_env = VecMonitor(vec_env)
 
-    # ------------------------------- Masked PPO -------------------------------------------
+    # ------------------------------- Recurrent PPO -------------------------------------------
     policy_kwargs = dict(
         features_extractor_class   = Match3Extractor,
         features_extractor_kwargs  = dict(features_dim=512),
-        net_arch                   = dict(pi=[512, 256], vf=[128, 32]),
+        # LSTM and net_arch have good defaults, can be omitted
     )
 
     # Create save directory
-    save_dir = "ai_training/models/7wonders_ppo_v6_curriculum"
+    save_dir = "ai_training/models/7wonders_recurrent_ppo_v1_all_levels"
     os.makedirs(save_dir, exist_ok=True)
 
-    model = MaskablePPO(
-        policy               = "MultiInputPolicy",
+    # Create learning rate schedule
+    lr_schedule = linear_lr_schedule(LR_INITIAL, LR_FINAL)
+
+    model = RecurrentPPO(
+        policy               = "MlpLstmPolicy",
         env                  = vec_env,
-        learning_rate        = linear_schedule(LR_INITIAL, LR_FINAL),
+        learning_rate        = lr_schedule,
         ent_coef             = ENT,
         n_steps              = HORIZON,
         batch_size           = BATCH_SIZE,
@@ -223,23 +220,18 @@ def main():
         target_kl            = TARGET_KL,
         max_grad_norm        = 0.5,
         verbose              = 1,
-        tensorboard_log      = "ai_training/runs/7wonders_ppo_v6_curriculum",
+        tensorboard_log      = "ai_training/runs/7wonders_recurrent_ppo_v1_all_levels",
         policy_kwargs        = policy_kwargs,
-        vf_coef=0.25
+        vf_coef=1,
     )
 
-
-
     try:
-        model.learn(
-            total_timesteps=TOTAL_STEPS,
-            callback=CurriculumCallback(LEVELS, TOTAL_STEPS, verbose=1)
-        )
+        model.learn(total_timesteps=TOTAL_STEPS)
     except KeyboardInterrupt:
         print("Training interrupted by user")
     finally:
         print("Saving model...")
-        model.save(os.path.join(save_dir, "7wonders_ppo_v6_curriculum_final"))
+        model.save(os.path.join(save_dir, "7wonders_recurrent_ppo_v1_all_levels_final"))
 
 if __name__ == "__main__":
     main()
