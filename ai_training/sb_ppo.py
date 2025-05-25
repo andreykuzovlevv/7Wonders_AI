@@ -197,7 +197,7 @@ def main():
         features_extractor_class   = Match3Extractor,
         features_extractor_kwargs  = dict(features_dim=512),
         net_arch                   = dict(pi=[512, 256], vf=[128, 32]),
-        lstm_hidden_size = 512 + 128,
+        lstm_hidden_size = 384,
     )
 
     # Create save directory
