@@ -35,8 +35,8 @@ class SevenWondersEnv(gym.Env):
         self.n_actions = len(self.swap_list)
         self.action_space = gym.spaces.Discrete(self.n_actions)
 
-        # (17, rows, cols) board tensor  +  (3,) global features  →  Dict space
-        board_low = np.zeros((17, rows, cols), dtype=np.float32)
+        # (14, rows, cols) board tensor  +  (4,) global features  →  Dict space
+        board_low = np.zeros((14, rows, cols), dtype=np.float32)
         board_high = np.ones_like(board_low)
         globals_low = np.zeros(4, dtype=np.float32)
         globals_high = np.ones(4, dtype=np.float32)

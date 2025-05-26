@@ -31,6 +31,12 @@ N_CONTENT = len(CONTENT_CLASSES)           # 13
 N_BG      = len(BACKGROUND_CLASSES)        # 3
 N_PLANES  = N_CONTENT + N_BG + 1           # +1 for mask ⟹ 17
 
+# --- Improved State Representation Constants ---
+N_GEM_TYPES = 8                            # Number of gem types (gem_0 to gem_7)
+N_IMPROVED_PLANES = N_GEM_TYPES + 2        # 8 gem planes + 1 background + 1 mask = 10 total
+MAX_FRAGMENTS_PER_BOARD = 2                # Maximum expected fragments on board at once
+MAX_BONUSES_PER_BOARD = 10                  # Maximum expected bonuses on board at once
+
 MAP_FG = {c: i for i, c in enumerate(CONTENT_CLASSES)}
 MAP_BG = {c: i for i, c in enumerate(BACKGROUND_CLASSES)}
 

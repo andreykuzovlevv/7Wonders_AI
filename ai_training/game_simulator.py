@@ -800,33 +800,38 @@ class SevenWondersSimulator:
         step_count = self.step_count / 250
         bonus_count = self.bonus2_trigger_count % 4 / 4
         return np.array([stones_ratio, fragments, step_count, bonus_count], dtype=np.float32)
+
+    def get_tensor_state(self) -> np.ndarray:
+        """
+        (14, H, W) float32 tensor suitable for direct input to a CNN.
+        """
+        H, W = self.rows, self.cols
+        planes = np.zeros((14, H, W), dtype=np.float32)
+
+        # 0-7 one-hot gems
+        for g in range(8):
+            planes[g] = (self.content == self.map_fg[f"gem_{g}"])
+
+        # channel 8  – fragment
+        planes[8]  = (self.content == self.FRAGMENT)
+
+        # channels 9-11 – bonuses
+        for k in range(3):
+            planes[9 + k] = (self.content == self.map_fg[f"bonus_{k}"])
+
+        # channel 12 – background coded to 0 / 0.5 / 1
+        planes[12] = self.background.astype(np.float32) / 2.0
+
+        # channel 13 – mask (valid cells)
+        planes[13] = self.mask.astype(np.float32)
+        return planes
     
-    def get_state_representation(self) -> np.ndarray:
-        """
-        Returns a (17, rows, cols) float32 tensor:
-        • 13 one‑hot planes for `content`
-        • 3  one‑hot planes for `background`
-        • 1  binary plane for `mask` (holes)
-        """
-        # --- 13 content planes --------------------------------------------------
-        content_oh = np.eye(config.N_CONTENT, dtype=np.float32)[self.content]          # (rows, cols, 13)
-        content_oh = np.transpose(content_oh, (2, 0, 1))                        # (13, rows, cols)
-
-        # --- 3 background planes ----------------------------------------------
-        bg_oh = np.eye(config.N_BG, dtype=np.float32)[self.background]                 # (rows, cols, 3)
-        bg_oh = np.transpose(bg_oh, (2, 0, 1))                                  # (3, rows, cols)
-
-        # --- 1 mask plane ------------------------------------------------------
-        mask_plane = self.mask.astype(np.float32)[None, ...]                    # (1, rows, cols)
-
-        state = np.concatenate([content_oh, bg_oh, mask_plane], axis=0)         # (17, rows, cols)
-        return state
-
-    # convenience – one call returns everything the agent stores
     def get_state_tuple(self):
-        return (self.get_state_representation(), self.get_global_features())    
+        return self.get_tensor_state(), self.get_global_features()
 
-    # --- Optional: Helper for Display ---
+
+    # --- Helper for Display ---
+
     def display(self):
         """Prints a textual representation of the board."""
         hline = "+" + ("-" * 10 + "+") * self.cols
@@ -856,8 +861,6 @@ class SevenWondersSimulator:
             f"Score: {self.score}, Stones Cleared: {self.stones_cleared}/{self.initial_stones}, Fragments: {self.fragments_on_board}, B2 Count: {self.bonus2_trigger_count}"
         )
         print("=" * (len(hline)))
-
-
 
 if __name__ == "__main__":
     pass

@@ -15,7 +15,7 @@ from .sw_gym_env import SevenWondersEnv               # gym wrapper used in trai
 import config                                         # rows, cols, asset paths, constants
 
 # --- files / hyper --------------------------------------------------------
-MODEL_PATH = "ai_training/models/7wonders_ppo_v4/7wonders_ppo_v4_final.zip"     # adjust if necessary
+MODEL_PATH = "ai_training/models/7wonders_ppo_v7_all_levels/7wonders_ppo_v7_all_levels_final.zip"     # adjust if necessary
 TILE_SIZE  = 50
 GRID_MARGIN = 2
 SCREEN_WIDTH  = 10 * (TILE_SIZE + GRID_MARGIN) + GRID_MARGIN
