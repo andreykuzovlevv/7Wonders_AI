@@ -92,7 +92,7 @@ def main():
     lr_schedule = linear_lr_schedule(LR_INITIAL, LR_FINAL)
 
     model = MaskablePPO(
-        policy               = "MlpLstmPolicy",
+        policy               = "MultiInputPolicy",
         env                  = vec_env,
         learning_rate        = lr_schedule,
         ent_coef             = ENT,
