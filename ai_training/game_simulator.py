@@ -38,6 +38,7 @@ class SevenWondersSimulator:
         self.fragments_on_board = 0
         self.max_fragments = 1
         self.fragment_spawned = False 
+        self.cascade_loops = 0
         self.debug_mode = debug_mode  # Flag to control debug output
 
         # Map string names to integers using config
@@ -579,11 +580,14 @@ class SevenWondersSimulator:
         Execute one player swap, resolve all bonus chains + cascades, then return:
             (next_state, reward, done)
         """
+
         valid_swaps = self.get_valid_swaps()
 
         if self.debug_mode:
             print(f"Stepping with swap: {swap_action}")
         (r1, c1), (r2, c2) = swap_action
+
+        self.cascade_loops = 0
 
         # ---- 0. basic legality checks ------------------------------------
         if swap_action not in valid_swaps:
@@ -610,6 +614,8 @@ class SevenWondersSimulator:
 
         # ---- 2. CASCADE LOOP --------------------------------------------
         while True:
+            self.cascade_loops += 1
+
             # Cleared contents (gems, bonuses); To break background tiles
             cleared, to_break, bonus_breaks = set(), set(), set()
             processed_bonuses = set()          # NEW: bonuses that already exploded
@@ -646,7 +652,7 @@ class SevenWondersSimulator:
                 
                 # Get match details to determine bonus placement and additional rewards
                 md = self._get_match_details(matches, swap_action)
-                # step_reward += md['total_reward']
+                
                 
                 # Place bonuses at the appropriate positions
                 for bonus_r, bonus_c, bonus_type in md['bonus_placements']:
@@ -667,7 +673,7 @@ class SevenWondersSimulator:
             for cr, cc in cleared:
                 self.content[cr, cc] = self.EMPTY
 
-            # step_reward += len(cleared) * 0.1
+            step_reward += len(cleared) * 0.1
 
 
             # floor = 1.0
@@ -794,12 +800,13 @@ class SevenWondersSimulator:
         return step_reward, False, valid_swaps
     
     def get_global_features(self) -> np.ndarray:
-        """4 floats in [0,1] – tweak as you like."""
+        """5 floats in [0,1]."""
         stones_ratio = self.stones_cleared / max(1, self.initial_stones)
         fragments = self.fragments_on_board
         step_count = self.step_count / 250
         bonus_count = self.bonus2_trigger_count % 4 / 4
-        return np.array([stones_ratio, fragments, step_count, bonus_count], dtype=np.float32)
+        loops_normalized = min(self.cascade_loops, 10) / 10
+        return np.array([stones_ratio, fragments, step_count, bonus_count, loops_normalized], dtype=np.float32)
 
     def get_tensor_state(self) -> np.ndarray:
         """

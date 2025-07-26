@@ -8,13 +8,13 @@ from stable_baselines3.common.callbacks import BaseCallback
 from typing import Callable
 import config                   
 from .sw_gym_env import SevenWondersEnv
-from .feature_extractor import RotInvMatch3Extractor
+from .feature_extractor import Match3FeaturesExtractor, torch
 import os
 
 # --------------------------- global hyper-parameters ---------------------------
-N_ENVS        = 8
-HORIZON       = 2048    
-TOTAL_STEPS   = 10_000_000
+N_ENVS        = 32
+HORIZON       = 1024    
+TOTAL_STEPS   = 50_000_000
 
 LR_INITIAL    = 1e-3
 LR_FINAL      = 1e-4
@@ -22,14 +22,14 @@ LR_FINAL      = 1e-4
 ENT           = 1e-3            
                
 
-CLIP_RANGE    = 0.15
-TARGET_KL     = None                  
+CLIP_RANGE    = 0.2
+TARGET_KL     = 0.03                  
 
-BATCH_SIZE    = 1024
-EPOCHS        = 6
+BATCH_SIZE    = 2048    
+EPOCHS        = 4
 
-GAMMA         = 0.7
-GAE_LAMBDA    = 0.65
+GAMMA         = 0.99
+GAE_LAMBDA    = 0.95
 
 MAX_MOVES     = 400
 
@@ -39,9 +39,9 @@ LEVELS = [config.LEVEL_1, config.LEVEL_2, config.LEVEL_3,
 
 # Level distribution: 3 x Level 1, 1 each of others
 LEVEL_DISTRIBUTION = [
-    config.LEVEL_1, config.LEVEL_1,
-    config.LEVEL_2, config.LEVEL_3, config.LEVEL_4,
-    config.LEVEL_5, config.LEVEL_6, config.LEVEL_7
+    config.LEVEL_1,# config.LEVEL_1,
+    # config.LEVEL_2, config.LEVEL_3, config.LEVEL_4,
+    # config.LEVEL_5, config.LEVEL_6, config.LEVEL_7
 ]
 
 # --------------------------- learning rate schedule ---------------------------
@@ -74,25 +74,28 @@ def make_env(level_config):
 
 def main():
     # Initialize environments with distributed levels
-    vec_env = SubprocVecEnv([make_env(LEVEL_DISTRIBUTION[i]) for i in range(N_ENVS)])
+    vec_env = SubprocVecEnv([make_env(config.LEVEL_1) for i in range(N_ENVS)])
     vec_env = VecMonitor(vec_env)
 
-    # ------------------------------- Recurrent PPO -------------------------------------------
-    policy_kwargs = dict(
-        features_extractor_class   = RotInvMatch3Extractor,
-        net_arch                   = dict(pi=[384, 256], vf=[128, 32]),
-        # lstm_hidden_size = 512,
-    )
+
 
     # Create save directory
-    save_dir = "ai_training/models/7wonders_recurrent_ppo_v1_all_levels"
+    save_dir = "ai_training/models/7W_MPPO_L1"
     os.makedirs(save_dir, exist_ok=True)
 
     # Create learning rate schedule
     lr_schedule = linear_lr_schedule(LR_INITIAL, LR_FINAL)
 
+    policy_kwargs = dict(
+        features_extractor_class=Match3FeaturesExtractor,
+        features_extractor_kwargs=dict(cnn_out=256, glob_out=32),
+        net_arch=[dict(pi=[256,128], vf=[256,128])],  # heads after extractor
+        activation_fn=torch.nn.ReLU,
+    )
+
     model = MaskablePPO(
         policy               = "MultiInputPolicy",
+        policy_kwargs        = policy_kwargs,
         env                  = vec_env,
         learning_rate        = lr_schedule,
         ent_coef             = ENT,
@@ -105,9 +108,10 @@ def main():
         target_kl            = TARGET_KL,
         max_grad_norm        = 0.5,
         verbose              = 1,
-        tensorboard_log      = "ai_training/runs/7wonders_recurrent_ppo_v1_all_levels",
-        policy_kwargs        = policy_kwargs,
-        vf_coef=1,
+        vf_coef              = 0.5,
+        clip_range_vf        = 0.2,
+        tensorboard_log      = "ai_training/runs/7W_MPPO_L1_v2",
+
     )
 
     try:
@@ -116,7 +120,7 @@ def main():
         print("Training interrupted by user")
     finally:
         print("Saving model...")
-        model.save(os.path.join(save_dir, "7wonders_recurrent_ppo_v1_all_levels_final"))
+        model.save(os.path.join(save_dir, "7W_MPPO_L1_v2"))
 
 if __name__ == "__main__":
     main()
