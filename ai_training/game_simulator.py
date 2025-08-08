@@ -779,14 +779,6 @@ class SevenWondersSimulator:
                 print(f"Win check passed")
                 self.display()
 
-            # def win_reward(step_count):
-            #     A = 10000
-            #     B = np.log(3) / 50
-            #     return A * np.exp(-B * step_count)
-            
-            # A, tau = 100.0, 0.05      # adjust A to dominate other rewards
-            # step_reward += A * math.exp(-tau * self.step_count)
-
             assert valid_swaps, "Simulator returned no legal moves"
             return step_reward, True, valid_swaps
 

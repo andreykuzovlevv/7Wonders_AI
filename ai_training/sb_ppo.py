@@ -8,13 +8,13 @@ from stable_baselines3.common.callbacks import BaseCallback
 from typing import Callable
 import config                   
 from .sw_gym_env import SevenWondersEnv
-from .feature_extractor import Match3FeaturesExtractor, torch
+from .feature_extractor import RotInvMatch3Extractor
 import os
 
 # --------------------------- global hyper-parameters ---------------------------
-N_ENVS        = 32
-HORIZON       = 1024    
-TOTAL_STEPS   = 50_000_000
+N_ENVS        = 8
+HORIZON       = 2048    
+TOTAL_STEPS   = 10_000_000
 
 LR_INITIAL    = 1e-3
 LR_FINAL      = 1e-4
@@ -22,14 +22,14 @@ LR_FINAL      = 1e-4
 ENT           = 1e-3            
                
 
-CLIP_RANGE    = 0.2
-TARGET_KL     = 0.03                  
+CLIP_RANGE    = 0.15
+TARGET_KL     = None                  
 
-BATCH_SIZE    = 2048    
-EPOCHS        = 4
+BATCH_SIZE    = 1024
+EPOCHS        = 6
 
-GAMMA         = 0.99
-GAE_LAMBDA    = 0.95
+GAMMA         = 0.7
+GAE_LAMBDA    = 0.65
 
 MAX_MOVES     = 400
 
@@ -80,22 +80,14 @@ def main():
 
 
     # Create save directory
-    save_dir = "ai_training/models/7W_MPPO_L1"
+    save_dir = "ai_training/models/7wonders_maskable_PPO_level1_only"
     os.makedirs(save_dir, exist_ok=True)
 
     # Create learning rate schedule
     lr_schedule = linear_lr_schedule(LR_INITIAL, LR_FINAL)
 
-    policy_kwargs = dict(
-        features_extractor_class=Match3FeaturesExtractor,
-        features_extractor_kwargs=dict(cnn_out=256, glob_out=32),
-        net_arch=[dict(pi=[256,128], vf=[256,128])],  # heads after extractor
-        activation_fn=torch.nn.ReLU,
-    )
-
     model = MaskablePPO(
         policy               = "MultiInputPolicy",
-        policy_kwargs        = policy_kwargs,
         env                  = vec_env,
         learning_rate        = lr_schedule,
         ent_coef             = ENT,
@@ -108,10 +100,8 @@ def main():
         target_kl            = TARGET_KL,
         max_grad_norm        = 0.5,
         verbose              = 1,
-        vf_coef              = 0.5,
-        clip_range_vf        = 0.2,
-        tensorboard_log      = "ai_training/runs/7W_MPPO_L1_v2",
-
+        tensorboard_log      = "ai_training/runs/7W_MPPO_dflt_L1",
+        vf_coef=1,
     )
 
     try:
@@ -120,7 +110,7 @@ def main():
         print("Training interrupted by user")
     finally:
         print("Saving model...")
-        model.save(os.path.join(save_dir, "7W_MPPO_L1_v2"))
+        model.save(os.path.join(save_dir, "7wonders_maskable_PPO_level1_only"))
 
 if __name__ == "__main__":
     main()
